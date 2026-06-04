@@ -8,15 +8,20 @@
 ## Phase 1 — Directory & File Discovery
 
 ```bash
-# Root directories
+# Root directories — get baseline first
+curl -s http://<TARGET>/ | wc -c
+
 ffuf -w <wordlist> -u http://<TARGET>/FUZZ -ic -c -fs <baseline>
 
-# Extension fuzz inside found directories (always do this — plain fuzz misses files)
+# Extension fuzz inside every found directory — ALWAYS do this, plain fuzz misses files
 ffuf -w <wordlist> -u http://<TARGET>/<dir>/FUZZ \
-     -e .php,.html,.txt,.bak,.zip -ic -c -fs 0,281
+     -e .php,.html,.txt,.bak,.zip -ic -c -fs <baseline>
 ```
 
-Always curl every discovered page before fuzzing parameters — error messages often leak parameter names directly.
+**Notes:**
+- Get baseline size with `curl -s <url> | wc -c` before every fuzz — never hardcode a size
+- The value `281` (Apache default 403 size) only applies to Apache servers — always measure, don't assume
+- Always curl every discovered page before fuzzing parameters — error messages often leak parameter names directly, letting you skip name fuzzing entirely
 
 ---
 

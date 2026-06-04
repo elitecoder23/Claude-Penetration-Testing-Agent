@@ -20,15 +20,22 @@ curl -s http://<TARGET>/ | grep -i script
 ## Step 3 — Deobfuscate
 
 ### Packer (`eval(function(p,a,c,k,e,d)`)
-- Online: https://matthewfl.com/unPacker.html
-- Manual: extract the packed string + dictionary array, substitute each index
 
-**Manual decode rule:**
-- Base is the `a` argument (e.g., 30 means base-30 indexing)
-- Dictionary is the `.split('|')` array
-- Map: `0-9` = indices 0-9, `a-z` = indices 10-35
-- **Empty string `''` values are falsy** → `k[c] || c.toString(a)` keeps the original character
-- Only substitute non-empty dictionary entries
+**Always run the code in jsconsole.com FIRST** before manual decoding — it instantly shows `console.log` output and saves time:
+1. Paste the full `eval(...)` into https://jsconsole.com and hit Enter
+2. Note any immediate output (console.log fires on load, outside function definitions)
+3. Only do manual decoding if you need values inside functions or jsconsole fails
+
+**Manual decode — step by step:**
+1. Extract the packed string (first arg to the outer function)
+2. Extract the dictionary: the `.split('|')` array — these are indexed 0–N
+3. Identify the base: the `a` argument (e.g., `30` = base 30)
+4. Map indices to characters: `0-9` = 0–9, `a-z` = 10–35 in that base
+5. For each single-character token in the packed string that matches an index, substitute the dictionary value
+6. **Falsy trap:** `k[c] || c.toString(a)` — if the dictionary value is `''` (empty string, falsy), the character is NOT replaced; it stays as the original index character (e.g., `j` stays `j`, `n` stays `n`)
+7. **Literal non-word characters survive unchanged** — the regex used is `\b\w+\b`, so characters like `!`, `{`, `}`, `'`, `/` are never touched by substitution. A `!` in the packed string comes out as `!` in the decoded output. Do not drop these.
+
+- Online tool: https://matthewfl.com/unPacker.html
 
 ### obfuscator.io style
 - Online: https://obf-io.deobfuscate.io/ or https://deobfuscate.io/

@@ -27,7 +27,9 @@ Deobfuscated code POSTs to `/keys.php` with no data:
 ```bash
 curl -s http://<TARGET>/keys.php -X POST
 ```
-**Answer (raw hex key returned):** `4150495f70336e5f37333537316e365f31355f66756e`
+**Answer:** `4150495f70336e5f37333537316e365f31355f66756e`
+
+The question asks for the key the server returns — which is the raw encoded hex string, not the decoded plaintext. Submit the hex as-is.
 
 ### Q5 — Decode the key and POST it back
 ```bash
