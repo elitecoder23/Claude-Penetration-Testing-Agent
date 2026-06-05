@@ -13,6 +13,7 @@ After each session or engagement, Claude commits:
 - **Technique notes** — specific tools, payloads, or patterns discovered during practice
 - **Checklists** — per-category checklists refined through experience
 - **Challenge writeups** — key lessons from CTF/HTB boxes
+- **Skills assessment writeups** — the skills assessment at the end of every HTB module is the most important writeup; it tests everything learned in the module and must always be committed. Write the full attack chain, key payloads, and lessons learned.
 
 ## Security Context
 
