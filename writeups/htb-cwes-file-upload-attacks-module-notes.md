@@ -332,6 +332,45 @@ if (!preg_match('/^.*\.(jpg|jpeg|png|gif)$/', $fileName)) { die(); }
 
 ---
 
+## Skills Assessment Lessons (Critical — Not in Module Text)
+
+### GIF8 magic bytes do NOT work against all MIME filters
+`echo "GIF8"` produces `image/gif` as the MIME type. If the server's type check uses a regex like `/image\/[a-z]{2,3}g/`, `image/gif` **fails** because `gif` ends in `f`, not `g`.
+
+**Fix:** Use JPEG magic bytes instead → `image/jpeg` → `jpe` + `g` → passes.
+```bash
+printf '\xFF\xD8\xFF\xe0' > shell.phar.jpg
+echo '<?php system($_REQUEST["cmd"]); ?>' >> shell.phar.jpg
+```
+
+MIME types that end in 'g' (pass `/image\/[a-z]{2,3}g/`):
+- `image/jpeg` ✓ (`jpe` + `g`)
+- `image/png` ✓ (`pn` + `g`)
+- `image/svg+xml` ✓ (contains `sv` + `g`)
+- `image/gif` ✗ (`gi` + `f`) — ends in f, NOT g
+
+### SVG XXE can fire at upload time, not just at access time
+If the server calls a function like `displayHTMLImage()` immediately after upload, the SVG is processed server-side during the upload request. The XXE entity resolves and **file content appears in the curl upload response** — no need to visit the file URL afterward.
+
+Always inspect the upload response for file content before trying to access the uploaded file.
+
+### Read the upload script source via XXE before uploading a webshell
+Use `php://filter/convert.base64-encode/resource=` to read the upload script. This reveals:
+- The uploads directory (`$target_dir`)
+- The file naming scheme (e.g. `date('ymd') . '_' . basename(filename)`)
+- The exact validation regexes
+
+Without this, you won't know the URL of your uploaded webshell.
+
+### Double extension with JPEG magic bytes bypasses strict combined filters
+`shell.phar.jpg` with JPEG magic bytes:
+- Passes blacklist (no `.php`/`.phps`/`.phtml`)
+- Passes whitelist (ends in `.jpg` = `jp` + `g`)
+- JPEG bytes → `image/jpeg` → passes MIME filter
+- Apache executes `.phar`-containing filenames if `<FilesMatch>` has no `$` anchor
+
+---
+
 ## Key Lessons Across the Module
 
 - **Always identify the framework first** — webshell must match server language
