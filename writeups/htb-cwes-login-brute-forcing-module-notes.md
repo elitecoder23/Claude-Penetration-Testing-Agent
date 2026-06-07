@@ -181,3 +181,5 @@ ls /home                        # find username hints
 | S8 — Web login form | `HTB{W3b_L0gin_Brut3F0rc3}` |
 | S10 — SSH+FTP pivot | `HTB{SSH_and_FTP_Bruteforce_Success}` |
 | S11 — Custom wordlists | `HTB{W3b_L0gin_Brut3F0rc3_Cu5t0m}` |
+| SA P1 — Basic Auth | password: `Admin123`, SA P2 username: `satwossh` |
+| SA P2 — SSH+FTP pivot | `HTB{brut3f0rc1ng_succ3ssful}` |
