@@ -1,2 +1,2 @@
 # Claude-Penetration-Testing-Agent
-Penetration Testing AI Agent - Claude
+Web Application Penetration Testing AI Agent - Claude
