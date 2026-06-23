@@ -65,6 +65,44 @@ Don't add complexity. The section tells you exactly what to test. Do that one th
 | 10 — Security Misconfiguration (SQLi) | `OR 1=1 --` on `/api/v1/suppliers/{Name}/count` | `151` (total suppliers) |
 | 10 — Security Misconfiguration (CORS) | Send `Origin: http://evil.com` header | `Access-Control-Allow-Origin: *` |
 | 11 — Improper Inventory Management | `GET /api/v0/supplier-companies/deleted` (no auth) | `HTB{43c2754afea99eba70fb2c8dc443c660}` |
+| 12 — Unsafe Consumption of APIs | `GET /api/v0/suppliers/deleted` → Yara MacDonald's `PasswordHash` | `006006C3167E90A7575A12E474218D86` |
+
+---
+
+## Section 12: Unsafe Consumption of APIs (API10:2023)
+
+### What It Is
+
+APIs that consume other APIs often trust the data they receive without proper validation. If a v1 API blindly ingests data from a legacy v0 API (which exposes sensitive fields like password hashes), those hashes propagate into the production system.
+
+- **CWE:** CWE-1357 — Reliance on Insufficiently Trustworthy Component
+- **OWASP:** API10:2023
+
+### Attack Pattern
+
+The question is theoretical: if v1 ingested data from `/api/v0/suppliers/deleted` unsafely, what sensitive data would be exposed in v1? Answer: whatever is in the v0 deleted endpoint, including password hashes.
+
+1. Hit the v0 deleted endpoint (no auth required)
+2. Find the target record by name
+3. Extract the `PasswordHash` field
+
+### Commands
+
+```bash
+curl -s 'http://<TARGET>/api/v0/suppliers/deleted' | jq '.[] | select(.Name == "<NAME>")'
+```
+
+### Exercise Result
+
+- **Target:** Yara MacDonald (deleted supplier)
+- **Endpoint:** `GET /api/v0/suppliers/deleted`
+- **Password hash:** `006006C3167E90A7575A12E474218D86`
+
+### Prevention
+
+- Never blindly ingest data from external or legacy APIs — always validate and sanitize
+- Sensitive fields like password hashes must never be forwarded to production systems
+- Use encrypted channels, strong auth, and rate limiting on all API-to-API communication
 
 ---
 
