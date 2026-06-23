@@ -64,6 +64,57 @@ Don't add complexity. The section tells you exactly what to test. Do that one th
 | 9 — SSRF | PATCH product `PNGPhotoFileURI` to `file:///etc/flag.conf`, GET `/products/{ID}/photo` | `HTB{3c94232c4f0b0a544ae4024833eef0b3}` |
 | 10 — Security Misconfiguration (SQLi) | `OR 1=1 --` on `/api/v1/suppliers/{Name}/count` | `151` (total suppliers) |
 | 10 — Security Misconfiguration (CORS) | Send `Origin: http://evil.com` header | `Access-Control-Allow-Origin: *` |
+| 11 — Improper Inventory Management | `GET /api/v0/supplier-companies/deleted` (no auth) | `HTB{43c2754afea99eba70fb2c8dc443c660}` |
+
+---
+
+## Section 11: Improper Inventory Management (API9:2023)
+
+### What It Is
+
+Failing to properly manage API versions leaves old, unmaintained versions accessible. These legacy versions often lack authentication, expose deleted data, or have known vulnerabilities that were fixed in newer versions.
+
+- **OWASP:** API9:2023
+
+### Attack Pattern
+
+1. Check the Swagger UI "Select a definition" dropdown — look for versions other than the current one (v0, v2, etc.)
+2. Review the v0/legacy endpoints — check if they require authentication (no lock icon = no auth)
+3. Hit the unauthenticated endpoints directly — no JWT needed
+4. Sensitive data (deleted records, password hashes, internal fields) is often exposed
+
+### Commands
+
+#### Enumerate deleted supplier companies (no auth required)
+```bash
+curl -s 'http://<TARGET>/api/v0/supplier-companies/deleted' | jq
+```
+
+#### Filter by ID (note: v0 uses uppercase field names like `ID`, not `id`)
+```bash
+curl -s 'http://<TARGET>/api/v0/supplier-companies/deleted' | jq '.[] | select(.ID == "<ID>")'
+```
+
+### What Works
+
+- v0 endpoints require no authentication — hit them directly without a JWT
+- Flag/sensitive data is often in unexpected fields (e.g., flag stored in `Email` field)
+- v0 field names may differ from v1 — uppercase `ID` vs lowercase `id`; always check raw response structure first
+
+### What Doesn't Work
+
+- jq filter `.[] | select(.id == "...")` fails if the field is uppercase `ID` — check field name casing from raw response first
+
+### Exercise Result
+
+- **Endpoint:** `GET /api/v0/supplier-companies/deleted` (no auth)
+- **Target ID:** `c250cb38-96e3-4ccf-9df2-0a03146a2d0b` (Hack The Box company)
+- **Flag location:** `Email` field
+- **Flag:** `HTB{43c2754afea99eba70fb2c8dc443c660}`
+
+### Prevention
+
+Remove legacy API versions entirely, or restrict them to localhost only. If neither is possible, enforce the same authentication and authorization as the current version. Never expose deleted or archived data through unauthenticated endpoints.
 
 ---
 
