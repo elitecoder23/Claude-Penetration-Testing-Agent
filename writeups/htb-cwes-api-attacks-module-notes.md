@@ -60,6 +60,46 @@ Don't add complexity. The section tells you exactly what to test. Do that one th
 | 5 — Mass Assignment | Set `NetSum: 0` on POST `/api/v1/customers/orders/items` | `HTB{4d86794f82046e465ca29d91bdbe5bca}` |
 | 6 — Unrestricted Resource Consumption | Spam SMS OTP endpoint with no rate limiting | `HTB{01de742d8cd942ad682aeea9ce3c5428}` |
 | 7 — BFLA | GET `/api/v1/customers/billing-addresses` with no roles | `HTB{1e2095c564baf0d2d316080217040dae}` |
+| 8 — Unrestricted Access to Sensitive Business Flows | Filter billing addresses by customer ID from BFLA endpoint | `788 Sauchiehall St.` |
+
+---
+
+## Section 8: Unrestricted Access to Sensitive Business Flows (API6:2023)
+
+### What It Is
+
+An API is vulnerable when it exposes operations or data that allow users to abuse or undermine business logic — e.g., knowing discount schedules to buy low and resell high, or accessing PII that enables targeted attacks. This is distinct from a raw data exposure bug; the harm is the business-level abuse the exposure enables.
+
+- **OWASP:** API6:2023
+- Often chained with BFLA or BOLA: the auth bypass creates the exposure, the business flow abuse is the downstream impact
+
+### Scenario in This Section
+
+The BFLA on `/api/v1/products/discounts` (Section 7) exposed discount schedules — enabling an attacker to time bulk purchases during discount windows and resell at full price. The billing addresses BFLA similarly exposes customer PII enabling targeted fraud.
+
+### Attack Pattern
+
+No new attack technique — this section reuses the BFLA vulnerability from Section 7. The question is: given the exposed data, what business harm can be done?
+
+1. Use the BFLA endpoint to retrieve all data
+2. Filter for a specific record using jq
+
+### Commands
+
+#### Filter all billing addresses for a specific customer ID
+```bash
+curl -s 'http://<TARGET>/api/v1/customers/billing-addresses' -H "Authorization: Bearer $JWT" | jq '.customersBillingAddresses[] | select(.customerID == "<ID>")'
+```
+
+### Exercise Result
+
+- **Customer ID:** `daa8c984-ba84-4265-8d88-12d6607e511c`
+- **Street address:** `788 Sauchiehall St.`
+- **City:** Glasgow, UK
+
+### Prevention
+
+Implement strict access controls on endpoints that expose business-sensitive data. Even if a user is authenticated, they should not be able to access data that enables business flow abuse (discount schedules, bulk pricing, competitor pricing, other customers' PII).
 
 ---
 
