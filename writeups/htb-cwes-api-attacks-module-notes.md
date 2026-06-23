@@ -62,6 +62,71 @@ Don't add complexity. The section tells you exactly what to test. Do that one th
 | 7 — BFLA | GET `/api/v1/customers/billing-addresses` with no roles | `HTB{1e2095c564baf0d2d316080217040dae}` |
 | 8 — Unrestricted Access to Sensitive Business Flows | Filter billing addresses by customer ID from BFLA endpoint | `788 Sauchiehall St.` |
 | 9 — SSRF | PATCH product `PNGPhotoFileURI` to `file:///etc/flag.conf`, GET `/products/{ID}/photo` | `HTB{3c94232c4f0b0a544ae4024833eef0b3}` |
+| 10 — Security Misconfiguration (SQLi) | `OR 1=1 --` on `/api/v1/suppliers/{Name}/count` | `151` (total suppliers) |
+| 10 — Security Misconfiguration (CORS) | Send `Origin: http://evil.com` header | `Access-Control-Allow-Origin: *` |
+
+---
+
+## Section 10: Security Misconfiguration (API8:2023)
+
+### What It Is
+
+APIs are vulnerable to the same security misconfigurations as web applications. This section covers two variants:
+
+1. **SQL Injection (CWE-89)** — user input concatenated directly into SQL queries
+2. **Insecure HTTP Headers** — missing or misconfigured security response headers (e.g., wildcard CORS)
+
+- **OWASP:** API8:2023
+
+### Attack Pattern — SQL Injection
+
+1. Authenticate → get JWT
+2. Check roles — role name maps to endpoint (`Suppliers_GetTotalCountBySupplierNameSubstring` → `/api/v1/suppliers/{Name}/count`)
+3. Test with normal input → get baseline count
+4. Test with trailing apostrophe (`a'`) → if error, endpoint is injectable
+5. Use `OR 1=1 --` payload to get total record count for the table
+
+### Attack Pattern — CORS Misconfiguration
+
+Send any request with an `Origin` header — if the response includes `Access-Control-Allow-Origin: *`, the API has a wildcard CORS policy that allows any domain to make cross-origin requests (enables CSRF).
+
+### Commands
+
+#### SQL injection — get total table count
+```bash
+curl -s "http://<TARGET>/api/v1/suppliers/a'%20OR%201=1%20--/count" -H "Authorization: Bearer $JWT" | jq
+```
+
+#### Test for CORS misconfiguration
+```bash
+curl -si 'http://<TARGET>/api/v1/suppliers/a/count' -H "Authorization: Bearer $JWT" -H "Origin: http://evil.com"
+```
+
+### What Works
+
+- URL-encode the SQL injection payload: space → `%20`, `'` stays as `'` in the path
+- `OR 1=1 --` returns ALL records in the table — the count is the answer
+- CORS headers only appear when an `Origin` header is present in the request — always test with one
+
+### Exercise Results
+
+**Q1 — SQL Injection**
+- User: `htbpentester13@hackthebox.com` (customer)
+- Role: `Suppliers_GetTotalCountBySupplierNameSubstring`
+- Endpoint: `GET /api/v1/suppliers/{Name}/count`
+- Payload: `a' OR 1=1 --`
+- Total suppliers in table: **151**
+
+**Q2 — CORS Misconfiguration**
+- Header: `Access-Control-Allow-Origin: *`
+- Only appears when `Origin` header is sent — not present in normal requests
+- Wildcard CORS allows any external domain to make authenticated cross-origin requests
+
+### Prevention
+
+- Use parameterized queries or ORM — never concatenate user input into SQL
+- Set `Access-Control-Allow-Origin` to a specific trusted origin, never `*`
+- Implement full OWASP Secure Headers: `X-Content-Type-Options`, `X-Frame-Options`, `Strict-Transport-Security`, `Content-Security-Policy`
 
 ---
 
