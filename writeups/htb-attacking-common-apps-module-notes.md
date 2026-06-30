@@ -1137,7 +1137,16 @@ Result: logged in as admin role → ServerStatus → Uname / Users / Netstat / *
 - Each JAR rebuild requires: compile → extract JAR to folder → overwrite `.class` files → repack with `jar -cmf`
 - Verify injection worked by checking logs via FileBrowser → `../logs/error-log.txt`
 
-### Lab Status
+### Additional Gotchas (learned during lab)
+- Notepad saves as `.txt` by default — if creating MANIFEST.MF in Notepad, rename with `mv META-INF\MANIFEST.MF.txt META-INF\MANIFEST.MF` after saving
+- If hosts file has no trailing newline, `Add-Content` appends to the same line instead of a new line — always verify with `cat` after adding
+- Two entries for the same hostname in hosts file — Windows (and Java) use the FIRST match; the pre-existing `172.16.17.114 fatty.htb server.fatty.htb` entry is correct; do NOT add a second conflicting entry for the target's external IP
+- Docker container running the fatty server is at `172.16.17.114` (internal Docker network), reachable from the RDP machine on port 1337
+- When patching multiple Java files across rebuilds, keep a single `raw/` folder and overwrite `.class` files there each time before repacking — no need to recreate from scratch each round
+- JD-GUI may fail to open fatty-server.jar — skip it; the SQL query and injection payload are known from the section content
+
+### Lab Answers
 - Target: `10.129.228.115` (ACADEMY-ACA-PIVOTAPI) — RDP as `cybervaca:&aue%C)}6g-d{w`
-- **Stopped at:** Step 3 — JAR extracted to `C:\Users\cybervaca\Desktop\fatty-client\`, hosts entry added
-- **Resume:** Edit `beans.xml` (port 8000→1337) → strip MANIFEST.MF → delete 1.RSA/1.SF → repack → log in → path traversal → get fatty-server.jar → SQLi as admin → Ipconfig
+- Docker container (fatty server): `172.16.17.114:1337`
+- UNION injection payload — Username: `abc' UNION SELECT 1,'abc','a@b.com','abc','admin` / Password: `abc`
+- Flag (Section 22 answer): eth0 IP = `172.28.0.3`
