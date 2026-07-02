@@ -1,6 +1,6 @@
 # HTB Academy — Attacking Common Applications: Module Notes
 
-**Status:** In progress (Sections 1–21 of 33 complete; Section 21 lab incomplete — pick up at x64dbg dump step)
+**Status:** COMPLETE — all 33 sections done, including Skills Assessments I, II, and III. See `htb-attacking-common-apps-skills-assessment.md` for the three assessment writeups. This was the final module in the HTB CWES path.
 
 ---
 

@@ -1,6 +1,6 @@
 # Attacking Common Applications — Skills Assessments
 
-HTB Academy "Attacking Common Applications" module, Sections 31–33 (three skills assessments).
+HTB Academy "Attacking Common Applications" module, Sections 31–33 (three skills assessments). **All three complete — module finished 33/33.**
 
 ---
 
@@ -122,3 +122,41 @@ cat C:\\Users\\Administrator\\Desktop\\flag.txt   # f55763d31a8f63ec935abd07aee5
 - **The obvious app may be a distractor.** WordPress (blog) had a single `admin` user and no vulnerable plugin — it was bait for a brute-force rabbit hole; the real path was GitLab→Nagios.
 - **Apps hide behind decoy roots.** `monitoring/` served a static template; the real Nagios XI was under `/nagiosxi/`. Check known app subpaths, not just `/`.
 - Credentials are often **unlabeled** (a Postgres `CREATE USER` line) — label-based greps miss them; read the actual files.
+
+---
+
+## Skills Assessment III — Hardcoded MSSQL creds in a .NET DLL (dnSpy)
+
+**Target:** 10.129.95.200 (ACADEMY-ACA-MULTIMASTER), Windows Server 2016.
+
+**Scenario:** the team already owns Administrator creds for a Windows host and hands them over. Task: RDP in and recover the **hardcoded MSSQL password** from `MultimasterAPI.dll`. This is a pure **Section 28** exercise (Attacking Applications Connecting to Services → .NET DLL branch) — no CVE, no exploitation, just decompile and read.
+
+### Answer
+- Q1 hardcoded DB password: **`D3veL0pM3nT!`** (uid `finder`, db `Hub_DB`, `server=localhost`)
+
+### Steps
+1. **RDP from Pwnbox** (creds `Administrator` / `xcyj8izxNVzhf4z`):
+   `xfreerdp /v:10.129.95.200 /u:Administrator /p:'xcyj8izxNVzhf4z' /dynamic-resolution +clipboard /cert:ignore`
+   - `root.txt` is sitting on the desktop (`89edf1a0bcdd83db7cc8d8a2f176a33e`) — **not** the graded answer; the DLL password is.
+2. **Locate the DLL:**
+   `Get-ChildItem -Path C:\ -Filter MultimasterAPI.dll -Recurse -ErrorAction SilentlyContinue | Select-Object FullName`
+   → `C:\inetpub\wwwroot\bin\MultimasterAPI.dll` (the copies under `Temporary ASP.NET Files\...\assembly\dl3\` are the same runtime-shadowed assembly).
+3. **Decompiler on box:** `C:\TOOLS\dnSpy\dnSpy.exe` (64-bit). Launch it → **File → Open** → the DLL.
+4. **Assembly Explorer:** `MultimasterAPI` → `MultimasterAPI.Controllers` → **`ColleagueController`**.
+5. In `GetColleagues([FromBody] JObject data)` the connection string is hardcoded inline:
+   ```csharp
+   string connString = "server=localhost;database=Hub_DB;uid=finder;password=D3veL0pM3nT!;";
+   SqlConnection con = new SqlConnection(connString);
+   ```
+   → password after `password=` is the answer.
+
+### Bonus observations (not needed for the flag)
+- Same method also builds the query with `string.Format("Select * from Colleagues where name like '%{0}%'", name)` on unsanitised `data["name"]` → **SQL injection** on `api/getColleagues`. (This is the injection point the real HTB *Multimaster* box uses for a foothold; here we already have Administrator.)
+- `[EnableCors("http://localhost:8081", "*", "POST")]` — the API is CORS-scoped to a local dev origin.
+
+### Lessons Learned
+- **Hardcoded creds in .NET live in the controller source, inline and unlabeled.** dnSpy → `*.Controllers` → the method that opens the `SqlConnection`. No need for `strings`/gdb tricks — .NET decompiles cleanly to readable C# (unlike the Section 28 ELF where the string was chunked/reversed and needed a runtime `x/s $rdx`).
+- **Shadow copies are noise.** Find the DLL once; ASP.NET keeps runtime copies under `Temporary ASP.NET Files\...\assembly\` — same assembly, ignore them, open the one in `wwwroot\bin`.
+- **`root.txt` ≠ the assessment answer.** The graded objective was the DB password; don't submit the first flag file you spot.
+- **This is the shortest of the three assessments** — foothold was granted, so the whole task was source recovery. Match effort to the actual objective instead of running a full exploitation chain out of habit.
+
