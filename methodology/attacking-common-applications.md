@@ -87,6 +87,8 @@ Bread-and-butter wins: **default creds, unpatched versions, misconfigurations.**
 - Fingerprint: `/users/sign_in`, `/help` shows version.
 - Check open registration, public repos, old commits for creds/SSH keys.
 - Username enum via signup/`/<user>.keys`. Version → known CVEs.
+- **Anonymous ≠ complete (Skills Assess II):** anonymous only sees **public** projects/snippets. GitLab's default visibility is **Internal** — visible to *any registered user*. If a repo is provided but shows no creds, **register at `/users/sign_up`, log in, then re-check `/dashboard/projects` + `/explore/projects`** — internal repos (e.g. a DB-setup repo with a `CREATE USER ... WITH PASSWORD` line) appear. A provided repo + a login-brute path don't coexist in a good box.
+- Sweep the **full history, all authors** (not just "Administrator"): `for sha in $(...commits...); do curl .../commits/$sha/diff; done`. Creds are often **unlabeled** — read files, don't only keyword-grep.
 
 ### Tomcat CGI / Shellshock
 - CVE-2019-0232: Windows Tomcat CGI batch arg injection (see Tomcat above).
