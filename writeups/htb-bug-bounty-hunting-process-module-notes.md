@@ -60,3 +60,69 @@ The **Policy** section is where an org publishes its program specifics. It typic
 
 ### Lab Answers
 - **Q1:** the **Code of Conduct** (establishes expectations for behavior while participating).
+
+---
+
+## Section 2 — Writing a Good Report
+
+### Key Concepts
+- A good report is **clear and concise** so the security/triage team gets the point fast. Above all, it must show **how to reproduce exploitation step-by-step**.
+- **Know your audience:** for **less mature companies**, translate technical issues into **business terms** so they grasp the real impact.
+- **Readable, well-formatted reports drastically cut reproduction time and time-to-triage** — which is exactly what gets a bug accepted and paid quickly.
+
+### The Essential Elements of a Bug Report (order can vary)
+| Element | Purpose |
+|---|---|
+| **Vulnerability Title** | Vuln **type + affected domain/parameter/endpoint + impact**. |
+| **CWE & CVSS score** | Communicate the vuln's **characteristics (CWE)** and **severity (CVSS)**. |
+| **Vulnerability Description** | Explain the **cause** so the reader understands it. |
+| **Proof of Concept (PoC)** | **Steps to reproduce** the exploit, clearly and concisely. |
+| **Impact** | What an attacker **achieves** with full exploitation — include **business impact and maximum damage**. |
+| **Remediation** | **Optional** in bug bounty, but good to include. |
+
+### Why CWE & CVSS?
+- **CWE (Common Weakness Enumeration)** — MITRE's community list of software/hardware **weakness types**. A common language and baseline for identification/mitigation/prevention.
+  - **In a vulnerability chain, pick the CWE of the *initial* vulnerability.**
+- **CVSS (Common Vulnerability Scoring System)** — the worldwide published standard for communicating **severity**. Use the **CVSS v3.1 Calculator**; for reports, focus on the **Base Score**.
+
+### CVSS v3.1 Base Metrics (memorize these)
+
+**Exploitability metrics:**
+
+| Metric | Values | Meaning |
+|---|---|---|
+| **Attack Vector (AV)** | **N**etwork / **A**djacent / **L**ocal / **P**hysical | *How* it's exploited. **N** = remote over network; **A** = same physical/logical network (incl. secure VPN); **L** = local access (keyboard/terminal), remote via SSH, or via user interaction; **P** = physical interaction. |
+| **Attack Complexity (AC)** | **L**ow / **H**igh | Conditions beyond the attacker's control. **L** = no special prep, repeatable; **H** = needs special prep / recon. |
+| **Privileges Required (PR)** | **N**one / **L**ow / **H**igh | **N** = unauthenticated; **L** = standard user (affects user-owned/non-sensitive assets); **H** = admin (affects the whole system). |
+| **User Interaction (UI)** | **N**one / **R**equired | **N** = attacker acts alone; **R** = a user must do something first. |
+| **Scope (S)** | **U**nchanged / **C**hanged | **U** = impact stays within the vulnerable component's security authority; **C** = impact crosses to a *different* security authority (e.g. webserver vuln → impacts the browser). |
+
+**Impact metrics** (Confidentiality / Integrity / Availability — each **N**one / **L**ow / **H**igh):
+
+| Metric | None | Low | High |
+|---|---|---|---|
+| **Confidentiality (C)** | no info impact | some info leaked, no control over what | total/serious disclosure, attacker controls what is obtained |
+| **Integrity (I)** | no data impact | limited modification, no control over consequence | modify all/critical data, total loss of integrity |
+| **Availability (A)** | no impact | reduced performance, can't fully deny service | total/severe loss, can deny service to users |
+
+### Worked Examples
+- **Cisco ASA IKEv1/IKEv2 Buffer Overflow (CVE-2016-1287) → 9.8 Critical.**
+  AV:N (internet-facing VPN), AC:L (just run the exploit), PR:N (unauthenticated), UI:N, **S:U** (can pivot *using* the box but the overflow itself doesn't cross authorities), C:H / I:H / A:H (reverse shell = full control, can power off).
+  - *Teaching point:* "you can use it as a pivot" still = **Scope Unchanged**; scope is about the vuln's *direct* impact crossing a security authority, not what you do post-exploitation.
+- **Stored XSS in an admin panel (malicious admin → admin) → 5.5 Medium.**
+  AV:N, AC:L (just store the payload), **PR:H** (needs admin to reach the panel), UI:N (victim admin just browses a regularly-visited page), **S:C** (vulnerable component = webserver, impacted component = browser), C:L (DOM access), I:L (XSS lightly affects integrity), A:N (XSS can't deny service).
+  - *Teaching point:* XSS is the classic **Scope: Changed** case — server-side flaw whose impact lands in a different component (the browser).
+
+### Tips & Approaches
+- Title formula: **[Vuln type] in [endpoint/parameter] on [domain] → [impact]**.
+- Let the CVSS vector *justify itself* in prose (like the examples) — one sentence per metric explaining your choice. This preempts triage disputes.
+- Study HackerOne's curated **good report examples** (SSRF→root in Exchange, RCE in Slack desktop, stored/reflected XSS cases, broken access control on store email, etc.) for tone, structure, and PoC clarity.
+- Follow the target program's **Reporting Format** exactly (Section 1) and HackerOne's **Submitting Reports** process for the mechanics.
+
+### Documentation Takeaways
+- Every report = **Title → CWE/CVSS → Description → PoC (repro steps) → Impact (business terms) → (optional) Remediation.**
+- **Impact must speak business risk**, not just technical detail — especially for less mature orgs.
+- **CVSS for chains:** score/CWE the **initial** vulnerability.
+
+### Lab Answers
+- **Q1:** **Adjacent (A)** — the **Attack Vector** value for an attacker in the same physical/logical network (secure VPN included).
