@@ -37,5 +37,12 @@ All content is for authorized penetration testing, CTF challenges, and defensive
 methodology/     # General attack phase frameworks
 techniques/      # Tool-specific and technique-specific notes
 checklists/      # Per-category enumeration and attack checklists
-writeups/        # CTF and HTB box writeups with key takeaways
+playbooks/       # Reusable exploit/vuln-type playbooks (triggered by an observation)
+writeups/        # HTB Academy module notes + skills-assessment writeups
+Machines/        # Standalone box writeups + machines-methodology.md (living box workflow)
 ```
+
+## Machines & Playbooks
+
+- **`Machines/machines-methodology.md`** is a *living* box workflow (recon → user → root, good habits). After rooting any box, append an entry to its **Refinement Log** with what worked, what wasted time, and the habit to keep.
+- **`playbooks/`** holds reusable, situation-triggered playbooks (web-fingerprint→CVE, shell stabilization, Linux privesc, localhost services, credential reuse, cron/incron). Add a playbook whenever a technique proves reusable across ≥2 boxes; keep the `playbooks/README.md` index current.
